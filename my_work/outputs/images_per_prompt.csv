@@ -1,0 +1,66 @@
+prompt,category,pexels_total
+dog,Animals,8000
+cat,Animals,8000
+bird,Animals,8000
+fish,Animals,8000
+snake,Animals,4319
+frog,Animals,3648
+butterfly,Animals,6520
+spider,Animals,4476
+crab,Animals,3875
+jellyfish,Animals,3354
+monkey,Animals,4897
+hamster,Animals,2401
+rabbit,Animals,4241
+horse,Animals,8000
+cow,Animals,5436
+sheep,Animals,4807
+elephant,Animals,4256
+lion,Animals,5086
+tiger,Animals,4190
+bear,Animals,5412
+sports car,Vehicles,8000
+truck,Vehicles,5547
+bus,Vehicles,5891
+motorcycle,Vehicles,8000
+bicycle,Vehicles,8000
+airplane,Vehicles,6289
+helicopter,Vehicles,3622
+sailboat,Vehicles,6683
+canoe,Vehicles,4868
+train,Vehicles,8000
+banana,Food,5544
+strawberry,Food,6360
+orange,Food,8000
+broccoli,Food,3817
+mushroom,Food,5205
+pizza,Food,4701
+cheeseburger,Food,3497
+ice cream,Food,8000
+coffee mug,Food,8000
+wine bottle,Food,8000
+chair,Everyday Objects,8000
+lamp,Everyday Objects,8000
+clock,Everyday Objects,7076
+backpack,Everyday Objects,8000
+umbrella,Everyday Objects,7767
+sunglasses,Everyday Objects,8000
+shoe,Everyday Objects,8000
+hat,Everyday Objects,8000
+vase,Everyday Objects,8000
+television,Everyday Objects,4673
+keyboard,Electronics & Instruments,6525
+mouse,Electronics & Instruments,4427
+camera,Electronics & Instruments,8000
+guitar,Electronics & Instruments,6498
+drum,Electronics & Instruments,4604
+violin,Electronics & Instruments,3454
+telescope,Electronics & Instruments,3983
+microscope,Electronics & Instruments,3962
+soccer ball,Sports & Recreation,8000
+basketball,Sports & Recreation,5081
+tennis ball,Sports & Recreation,7528
+baseball bat,Sports & Recreation,4396
+skateboard,Sports & Recreation,5701
+surfboard,Sports & Recreation,6352
+parachute,Sports & Recreation,3609

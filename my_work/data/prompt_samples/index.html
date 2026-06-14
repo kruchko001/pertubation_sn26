@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Perturb prompt samples (65 images)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; background: #111; color: #eee; }
+    h1 { margin-bottom: 8px; }
+    p { color: #aaa; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 20px;
+      margin-top: 24px;
+    }
+    figure {
+      margin: 0;
+      background: #1b1b1b;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid #333;
+    }
+    img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      background: #222;
+    }
+    figcaption {
+      padding: 10px 12px 14px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    a { color: #7cb8ff; }
+  </style>
+</head>
+<body>
+  <h1>Perturb validator prompts</h1>
+  <p>One Pexels image per prompt (65 total). Open this file in a browser to browse.</p>
+  <div class="grid">
+    
+        <figure>
+          <img src="airplane.jpg" alt="airplane" loading="lazy" />
+          <figcaption><strong>airplane</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/toy-airplane-and-people-dolls-around-20068548/">gu evary</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="backpack.jpg" alt="backpack" loading="lazy" />
+          <figcaption><strong>backpack</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/people-carrying-backpack-walking-in-the-forest-9629915/">Ivan S</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="banana.jpg" alt="banana" loading="lazy" />
+          <figcaption><strong>banana</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/fresh-yellow-bananas-on-a-table-in-bursa-37182860/">İbrahim Erkan Bayram | iebarts</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="baseball_bat.jpg" alt="baseball bat" loading="lazy" />
+          <figcaption><strong>baseball bat</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-shot-of-a-person-holding-a-baseball-bat-7238892/">light wizzi</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="basketball.jpg" alt="basketball" loading="lazy" />
+          <figcaption><strong>basketball</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/basketballs-in-basketball-arcade-13179883/">Engin Akyurt</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="bear.jpg" alt="bear" loading="lazy" />
+          <figcaption><strong>bear</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/bear-lying-down-on-ground-26800282/">Ali Kazal</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="bicycle.jpg" alt="bicycle" loading="lazy" />
+          <figcaption><strong>bicycle</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/bicycles-in-historic-european-arcade-36546545/">Valentina Sergi</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="bird.jpg" alt="bird" loading="lazy" />
+          <figcaption><strong>bird</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/colorful-toucanet-perched-in-costa-rican-forest-29275539/">Enrique Hidalgo</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="broccoli.jpg" alt="broccoli" loading="lazy" />
+          <figcaption><strong>broccoli</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/lemons-and-broccolis-inside-plastic-container-beside-plastic-water-containers-5719937/">Polina Tankilevitch</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="bus.jpg" alt="bus" loading="lazy" />
+          <figcaption><strong>bus</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/buss-and-cars-on-city-street-bus-display-word-sorry-4774659/">Oliver Boese</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="butterfly.jpg" alt="butterfly" loading="lazy" />
+          <figcaption><strong>butterfly</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/beautiful-butterfly-perched-on-flower-10068575/">Klub Boks</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="camera.jpg" alt="camera" loading="lazy" />
+          <figcaption><strong>camera</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/a-person-holding-a-camera-in-their-hand-26873540/">Sparki Arun</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="canoe.jpg" alt="canoe" loading="lazy" />
+          <figcaption><strong>canoe</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/paddling-a-yellow-canoe-19395907/">Jonathan Borba</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="cat.jpg" alt="cat" loading="lazy" />
+          <figcaption><strong>cat</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/playful-gray-cat-relaxing-indoors-on-colorful-blanket-35224529/">Rino Adamo</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="chair.jpg" alt="chair" loading="lazy" />
+          <figcaption><strong>chair</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/brown-wooden-chair-beside-white-wall-7193706/">www.kaboompics.com</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="cheeseburger.jpg" alt="cheeseburger" loading="lazy" />
+          <figcaption><strong>cheeseburger</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/cheese-on-burger-patties-on-a-griller-11220676/">Thiago Miranda</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="clock.jpg" alt="clock" loading="lazy" />
+          <figcaption><strong>clock</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/vintage-alarm-clock-on-wooden-desk-37808313/">Alexander Popadin</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="coffee_mug.jpg" alt="coffee mug" loading="lazy" />
+          <figcaption><strong>coffee mug</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/a-hanging-mug-in-close-up-photography-9261414/">Paloma Clarice</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="cow.jpg" alt="cow" loading="lazy" />
+          <figcaption><strong>cow</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/cattle-on-pasture-19977235/">Griffin Wooldridge</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="crab.jpg" alt="crab" loading="lazy" />
+          <figcaption><strong>crab</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-of-a-crab-held-in-human-hands-34350999/">David Eluwole</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="dog.jpg" alt="dog" loading="lazy" />
+          <figcaption><strong>dog</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/adorable-jack-russell-terrier-puppy-outdoors-32113856/">Rohit  George</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="drum.jpg" alt="drum" loading="lazy" />
+          <figcaption><strong>drum</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-photo-of-person-playing-djembe-6957258/">Thirdman</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="elephant.jpg" alt="elephant" loading="lazy" />
+          <figcaption><strong>elephant</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/graceful-elephant-grazing-in-kruger-national-park-25754094/">Lloyd Douglas</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="fish.jpg" alt="fish" loading="lazy" />
+          <figcaption><strong>fish</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/beautiful-tropical-fish-swimming-in-clear-water-34114524/">Jay Moon</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="frog.jpg" alt="frog" loading="lazy" />
+          <figcaption><strong>frog</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/frog-on-rock-moss-covered-20831274/">Fajar  Ismunanto</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="guitar.jpg" alt="guitar" loading="lazy" />
+          <figcaption><strong>guitar</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/a-person-playing-an-acoustic-guitar-27508913/">Paul Deetman</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="hamster.jpg" alt="hamster" loading="lazy" />
+          <figcaption><strong>hamster</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/person-holding-small-hamsters-in-hands-5241293/">Lucas Pezeta</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="hat.jpg" alt="hat" loading="lazy" />
+          <figcaption><strong>hat</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/stylish-couple-walking-in-urban-street-scene-36755672/">atelierbyvineeth . . .</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="helicopter.jpg" alt="helicopter" loading="lazy" />
+          <figcaption><strong>helicopter</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/helicopter-flying-over-el-salvador-sky-35979809/">Edu Raw</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="horse.jpg" alt="horse" loading="lazy" />
+          <figcaption><strong>horse</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-shot-of-a-horse-running-13340063/">Jana Malenová</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="ice_cream.jpg" alt="ice cream" loading="lazy" />
+          <figcaption><strong>ice cream</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/scoops-of-different-ice-cream-on-plate-1683546/">Valeria Boltneva</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="jellyfish.jpg" alt="jellyfish" loading="lazy" />
+          <figcaption><strong>jellyfish</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/medusas-27555660/">Alejandro Herrera</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="keyboard.jpg" alt="keyboard" loading="lazy" />
+          <figcaption><strong>keyboard</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/top-view-photo-of-keyboard-near-earphone-1420709/">Lukas Blazek</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="lamp.jpg" alt="lamp" loading="lazy" />
+          <figcaption><strong>lamp</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/modern-hanging-pendant-lights-in-a-cozy-interior-30561628/">Ziad Madkour</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="lion.jpg" alt="lion" loading="lazy" />
+          <figcaption><strong>lion</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/brown-lion-in-close-up-shot-11838539/">Luke Seago</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="microscope.jpg" alt="microscope" loading="lazy" />
+          <figcaption><strong>microscope</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/a-white-microscope-9574397/">Tima Miroshnichenko</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="monkey.jpg" alt="monkey" loading="lazy" />
+          <figcaption><strong>monkey</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/gibbon-swinging-in-thailand-s-forest-31591558/">Optical Chemist</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="motorcycle.jpg" alt="motorcycle" loading="lazy" />
+          <figcaption><strong>motorcycle</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/man-riding-motorcycle-on-road-16330298/">Isaac Mitchell</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="mouse.jpg" alt="mouse" loading="lazy" />
+          <figcaption><strong>mouse</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-of-small-rodent-in-natural-habitat-32513196/">Animesh Paul</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="mushroom.jpg" alt="mushroom" loading="lazy" />
+          <figcaption><strong>mushroom</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/tiny-mushrooms-growing-on-moss-19021725/">Masood Aslami</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="orange.jpg" alt="orange" loading="lazy" />
+          <figcaption><strong>orange</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/fresh-oranges-on-wooden-surface-with-bright-background-30925639/">Márcio  Carvalho</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="parachute.jpg" alt="parachute" loading="lazy" />
+          <figcaption><strong>parachute</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/person-paragliding-in-midair-4704984/">Daya Mb</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="pizza.jpg" alt="pizza" loading="lazy" />
+          <figcaption><strong>pizza</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-shot-of-pizzas-6068717/">Dario Garcia</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="rabbit.jpg" alt="rabbit" loading="lazy" />
+          <figcaption><strong>rabbit</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/brown-rabbit-on-brown-grass-field-8903042/">Irina Novikova</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="sailboat.jpg" alt="sailboat" loading="lazy" />
+          <figcaption><strong>sailboat</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/sailboat-cruising-on-lake-michigan-in-summer-35030754/">David Solce</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="sheep.jpg" alt="sheep" loading="lazy" />
+          <figcaption><strong>sheep</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/flock-of-sheep-grazing-on-green-pasture-29449085/">marie françoise bastien</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="shoe.jpg" alt="shoe" loading="lazy" />
+          <figcaption><strong>shoe</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-of-elegant-shoes-12210270/">Euwan Marbaniang</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="skateboard.jpg" alt="skateboard" loading="lazy" />
+          <figcaption><strong>skateboard</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/men-riding-a-skateboard-7519516/">Darina Belonogova</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="snake.jpg" alt="snake" loading="lazy" />
+          <figcaption><strong>snake</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/head-of-a-snake-on-a-leg-5800063/">Jan Kopřiva</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="soccer_ball.jpg" alt="soccer ball" loading="lazy" />
+          <figcaption><strong>soccer ball</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/football-photography-for-soccer-team-27915834/">Zyn Aly</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="spider.jpg" alt="spider" loading="lazy" />
+          <figcaption><strong>spider</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/spider-on-net-5406977/">𝙼𝚄𝚉𝙰𝙵𝙵𝙴𝚁</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="sports_car.jpg" alt="sports car" loading="lazy" />
+          <figcaption><strong>sports car</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/racing-car-at-urban-street-event-34243843/">Nikola Kojević</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="strawberry.jpg" alt="strawberry" loading="lazy" />
+          <figcaption><strong>strawberry</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/bunch-of-strawberries-on-white-surface-1350964/">Brian van den Heuvel</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="sunglasses.jpg" alt="sunglasses" loading="lazy" />
+          <figcaption><strong>sunglasses</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/black-framed-sunglasses-5202048/">www.kaboompics.com</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="surfboard.jpg" alt="surfboard" loading="lazy" />
+          <figcaption><strong>surfboard</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/photo-of-surf-boards-leaning-on-the-wall-3660188/">Mateusz Dach</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="telescope.jpg" alt="telescope" loading="lazy" />
+          <figcaption><strong>telescope</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/coin-operated-telescope-8465818/">Jan van der Wolf</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="television.jpg" alt="television" loading="lazy" />
+          <figcaption><strong>television</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/old-televisions-with-no-signal-6968875/">Ivan S</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="tennis_ball.jpg" alt="tennis ball" loading="lazy" />
+          <figcaption><strong>tennis ball</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/floating-tennis-ball-226584/">icon0 com</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="tiger.jpg" alt="tiger" loading="lazy" />
+          <figcaption><strong>tiger</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/im-reich-des-tigers-27834738/">Leon Aschemann</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="train.jpg" alt="train" loading="lazy" />
+          <figcaption><strong>train</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/30807451/">Antonio Garcia Prats</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="truck.jpg" alt="truck" loading="lazy" />
+          <figcaption><strong>truck</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/white-truck-on-road-6940962/">Feli Art</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="umbrella.jpg" alt="umbrella" loading="lazy" />
+          <figcaption><strong>umbrella</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/children-walking-with-umbrellas-in-toyokawa-japan-31184040/">Tien Nguyen</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="vase.jpg" alt="vase" loading="lazy" />
+          <figcaption><strong>vase</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/ceramic-vases-on-a-white-surface-7119222/">Ivan S</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="violin.jpg" alt="violin" loading="lazy" />
+          <figcaption><strong>violin</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/close-up-of-people-playing-on-violins-11515563/">Alexander Zvir</a> on Pexels
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="wine_bottle.jpg" alt="wine bottle" loading="lazy" />
+          <figcaption><strong>wine bottle</strong><br />
+            Photo by <a href="https://www.pexels.com/photo/cellar-with-wine-bottles-774455/">Bruno Cantuária</a> on Pexels
+          </figcaption>
+        </figure>
+  </div>
+</body>
+</html>

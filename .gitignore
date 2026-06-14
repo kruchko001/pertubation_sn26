@@ -10,6 +10,9 @@ venv/
 Perturb/scripts/*.env
 
 # Large downloaded datasets (manifests kept)
+my_work/data/prompt_images/**/*
+!my_work/data/prompt_images/**/manifest.json
+!my_work/data/prompt_images/manifest_all.json
 my_work/data/dog_images/dog_*
 !my_work/data/dog_images/manifest.json
 

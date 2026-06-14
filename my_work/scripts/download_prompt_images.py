@@ -17,6 +17,7 @@ MY_WORK = Path(__file__).resolve().parent.parent
 if str(MY_WORK) not in sys.path:
     sys.path.insert(0, str(MY_WORK))
 
+from env import load_env, pexels_api_key
 from paths import PERTURB, PROMPT_SAMPLES_DIR, ROOT
 
 if str(PERTURB) not in sys.path:
@@ -27,14 +28,6 @@ from perturbnet.constants import IMAGE_ENDPOINT, PEXELS_IMAGE_VARIANT, PROMPTS
 
 def _slug(prompt: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", prompt.strip().lower()).strip("_")
-
-
-def _resolve_api_key(cli_key: str) -> str:
-    return (
-        cli_key.strip()
-        or os.getenv("PERTURB_PEXELS_API_KEY", "").strip()
-        or os.getenv("PEXELS_API_KEY", "").strip()
-    )
 
 
 def _pick_image_url(photo: dict, variant: str) -> str | None:
@@ -188,11 +181,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Download only first N prompts (0 = all)")
     args = parser.parse_args()
 
-    api_key = _resolve_api_key(args.pexels_api_key)
+    load_env()
+    api_key = pexels_api_key(args.pexels_api_key)
     if not api_key:
         print(
-            "Missing Pexels API key. Set PERTURB_PEXELS_API_KEY or pass --pexels-api-key.\n"
-            "Free key: https://www.pexels.com/api/",
+            "Missing Pexels API key. Add PERTURB_PEXELS_API_KEY to my_work/.env "
+            "or pass --pexels-api-key.\nFree key: https://www.pexels.com/api/",
             file=sys.stderr,
         )
         return 1

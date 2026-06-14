@@ -15,6 +15,7 @@ MY_WORK = Path(__file__).resolve().parent.parent
 if str(MY_WORK) not in sys.path:
     sys.path.insert(0, str(MY_WORK))
 
+from env import load_env, pexels_api_key
 from paths import IMAGES_PER_PROMPT_CSV, PERTURB, PEXELS_COUNTS_JSON
 
 if str(PERTURB) not in sys.path:
@@ -57,13 +58,6 @@ PROMPT_TO_CATEGORY = {
 }
 
 
-def _api_key() -> str:
-    return (
-        os.getenv("PERTURB_PEXELS_API_KEY", "").strip()
-        or os.getenv("PEXELS_API_KEY", "").strip()
-    )
-
-
 def fetch_total(session: requests.Session, endpoint: str, api_key: str, prompt: str) -> int:
     response = session.get(
         endpoint,
@@ -78,9 +72,10 @@ def fetch_total(session: requests.Session, endpoint: str, api_key: str, prompt: 
 
 
 def main() -> int:
-    api_key = _api_key()
+    load_env()
+    api_key = pexels_api_key()
     if not api_key:
-        print("Missing PERTURB_PEXELS_API_KEY", file=sys.stderr)
+        print("Missing PERTURB_PEXELS_API_KEY in my_work/.env", file=sys.stderr)
         return 1
 
     session = requests.Session()

@@ -3,8 +3,12 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.env
 *.env
+!my_work/.env
 .env.*
+!.env.example
+!my_work/.env.example
 
 # Perturb runtime (upstream template)
 Perturb/scripts/*.env

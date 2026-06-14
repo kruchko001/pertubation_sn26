@@ -19,20 +19,13 @@ if str(MY_WORK) not in sys.path:
 if str(PERTURB) not in sys.path:
     sys.path.insert(0, str(PERTURB))
 
+from env import load_env, pexels_api_key
 from paths import PROMPT_IMAGES_DIR, prompt_images_dir, slugify_prompt
 from perturbnet.constants import IMAGE_ENDPOINT, PROMPTS
 
 ENDPOINT = IMAGE_ENDPOINT
 PER_PAGE = 80  # Pexels max
 DEFAULT_DELAY_SECONDS = 0.3
-
-
-def _api_key(cli_key: str) -> str:
-    return (
-        cli_key.strip()
-        or os.getenv("PERTURB_PEXELS_API_KEY", "").strip()
-        or os.getenv("PEXELS_API_KEY", "").strip()
-    )
 
 
 def _extension(url: str, content_type: str) -> str:
@@ -218,9 +211,14 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    api_key = _api_key(args.pexels_api_key)
+    load_env()
+    api_key = pexels_api_key(args.pexels_api_key)
     if not api_key:
-        print("Missing Pexels API key. Set PERTURB_PEXELS_API_KEY or pass --pexels-api-key.", file=sys.stderr)
+        print(
+            "Missing Pexels API key. Add PERTURB_PEXELS_API_KEY to my_work/.env "
+            "or pass --pexels-api-key.",
+            file=sys.stderr,
+        )
         return 1
 
     if args.output_dir is not None and len(prompts) != 1:

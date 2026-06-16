@@ -29,15 +29,6 @@ def load_env() -> None:
             os.environ[key] = value
 
 
-def pexels_api_key(cli_override: str = "") -> str:
-    load_env()
-    return (
-        cli_override.strip()
-        or os.getenv("PERTURB_PEXELS_API_KEY", "").strip()
-        or os.getenv("PEXELS_API_KEY", "").strip()
-    )
-
-
 def github_token() -> str:
     load_env()
     return os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GH_TOKEN", "").strip()

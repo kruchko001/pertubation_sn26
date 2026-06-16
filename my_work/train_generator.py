@@ -35,7 +35,6 @@ from model_utils import (
     cw_loss,
     eval_batch,
     forward_adv,
-    jpeg_round_trip,
     load_frozen_classifier,
     psnr_loss_differentiable,
     ssim_loss_differentiable,
@@ -44,7 +43,6 @@ from model_utils import (
 )
 from paths import OUTPUTS
 from perturb_mirror.constants import MAX_LINF_DELTA, MIN_LINF_DELTA
-from perturb_mirror.validator import sample_epsilon
 
 
 # ─── Dataset ──────────────────────────────────────────────────────────────────
@@ -112,7 +110,6 @@ def train_one_epoch(
     ssim_weight: float,
     psnr_weight: float,
     log_every: int,
-    epoch_seed: int,
 ) -> dict[str, float]:
     generator.train()
     totals: dict[str, float] = {"loss": 0.0, "cw": 0.0, "ssim": 0.0, "psnr": 0.0}
@@ -242,7 +239,6 @@ def main() -> int:
             ssim_weight=args.ssim_weight,
             psnr_weight=args.psnr_weight,
             log_every=args.log_every,
-            epoch_seed=args.seed + epoch,
         )
         val_stats = validate(generator, classifier, val_loader, device, epsilon=args.val_epsilon)
 

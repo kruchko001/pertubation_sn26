@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import io
 import math
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 
-from perturb_mirror.constants import MIN_LINF_DELTA, MIN_PSNR_DB, MIN_SSIM
-from perturb_mirror.image_io import decode_image_b64, encode_image_b64
+from perturb_mirror.constants import MAX_LINF_DELTA, MIN_LINF_DELTA, MIN_PSNR_DB, MIN_SSIM
 from perturb_mirror.model import (
     PREPROCESS,
     load_efficientnet_v2_l,
@@ -27,34 +24,6 @@ def load_frozen_classifier(device: torch.device) -> torch.nn.Module:
     for p in model.parameters():
         p.requires_grad = False
     return model
-
-
-# ─── Byte round-trips ─────────────────────────────────────────────────────────
-
-def jpeg_round_trip(image_chw: torch.Tensor, quality: int = 95) -> torch.Tensor:
-    """
-    JPEG q=95 encode → decode (CPU, PIL).
-    Matches validator: PIL → JPEG q=95 → base64 → decode_image_b64.
-    """
-    arr = (image_chw.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(arr, mode="RGB").save(buf, format="JPEG", quality=quality)
-    buf.seek(0)
-    decoded = np.asarray(Image.open(buf).convert("RGB"), dtype=np.float32) / 255.0
-    return torch.from_numpy(decoded).permute(2, 0, 1).contiguous().to(image_chw.device)
-
-
-def png_round_trip(image_chw: torch.Tensor) -> torch.Tensor:
-    """
-    PNG encode → decode (CPU, PIL).
-    Matches miner submission path: encode_image_b64 (PNG) → validator decode_image_b64.
-    """
-    arr = (image_chw.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(arr, mode="RGB").save(buf, format="PNG")
-    buf.seek(0)
-    decoded = np.asarray(Image.open(buf).convert("RGB"), dtype=np.float32) / 255.0
-    return torch.from_numpy(decoded).permute(2, 0, 1).contiguous().to(image_chw.device)
 
 
 # ─── STE quantization ─────────────────────────────────────────────────────────
@@ -183,7 +152,8 @@ def eval_batch(
     flipped = 0
     ssim_sum = 0.0
     psnr_sum = 0.0
-    effective_max = min(epsilon, MIN_LINF_DELTA * 10)  # approximate; real epsilon comes from sampler
+    # Mirror verify_and_score: effective ceiling = min(challenge.epsilon, max_linf_delta)
+    effective_max_delta = min(epsilon, MAX_LINF_DELTA)
 
     for i in range(batch):
         c = clean_bchw[i]
@@ -192,7 +162,7 @@ def eval_batch(
 
         if delta < min_linf_delta:
             continue
-        if delta > epsilon:
+        if delta > effective_max_delta:
             continue
 
         # SSIM (validator formula)

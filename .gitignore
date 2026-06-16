@@ -10,8 +10,8 @@ venv/
 !.env.example
 !my_work/.env.example
 
-# Perturb runtime (upstream template)
-Perturb/scripts/*.env
+# Perturb/ is the official upstream subnet repo — do not track
+Perturb/
 
 # Large local datasets (ImageNet-100 exports)
 my_work/data/imagenet100_samples/**/*

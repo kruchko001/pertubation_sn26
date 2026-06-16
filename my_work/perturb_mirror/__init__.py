@@ -15,7 +15,7 @@ from perturb_mirror.constants import (
     SUBNET_NAMESPACE,
     TIMEOUT_SECONDS,
 )
-from perturb_mirror.image_io import decode_image_b64, encode_image_b64
+from perturb_mirror.image_io import decode_image_b64, decode_image_b64_to_numpy, encode_image_b64
 from perturb_mirror.imagenet100_bootstrap import imagenet100_dataset_version, load_imagenet100
 from perturb_mirror.model import (
     LABELS,
@@ -73,6 +73,7 @@ __all__ = [
     "compute_psnr_db",
     "compute_ssim",
     "decode_image_b64",
+    "decode_image_b64_to_numpy",
     "derive_true_label",
     "encode_image_b64",
     "imagenet100_dataset_version",

@@ -26,16 +26,12 @@ Usage (from my_work/):
 from __future__ import annotations
 
 import argparse
-import base64
-import io
 import json
 import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 MY_WORK = Path(__file__).resolve().parent.parent
@@ -43,6 +39,7 @@ if str(MY_WORK) not in sys.path:
     sys.path.insert(0, str(MY_WORK))
 
 from paths import IMAGENET100_SAMPLES_DIR
+from perturb_mirror.image_io import decode_image_b64_to_numpy
 from perturb_mirror.model import PREPROCESS, load_efficientnet_v2_l
 
 
@@ -84,11 +81,8 @@ class B64Dataset(Dataset):
         # Step 1: read saved base64 string
         b64 = (self.data_dir / f"{row:07d}.b64").read_text(encoding="utf-8")
 
-        # Step 2: decode → JPEG bytes → PIL → float [0,1] CHW (native resolution)
-        raw = base64.b64decode(b64)
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
-        arr = np.asarray(img, dtype=np.float32) / 255.0
-        tensor_chw = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+        # Step 2: decode → PIL RGB → float [0,1] CHW (native resolution)
+        tensor_chw = torch.from_numpy(decode_image_b64_to_numpy(b64)).contiguous()
 
         # Step 3: PREPROCESS per image (handles variable resolution → 480×480)
         tensor_480 = PREPROCESS(tensor_chw.unsqueeze(0)).squeeze(0)

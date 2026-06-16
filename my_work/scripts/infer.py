@@ -17,7 +17,7 @@ if str(MY_WORK) not in sys.path:
 
 from challenge_io import file_to_b64, imagenet100_row_to_b64, infer_true_label, load_imagenet100_dataset
 from paths import OUTPUTS
-from perturb_mirror.image_io import decode_image_b64
+from perturb_mirror.image_io import decode_image_b64, decode_image_b64_to_numpy
 from perturb_mirror.model import (
     PREPROCESS,
     _preprocess_for_efficientnet_v2_l,
@@ -41,6 +41,11 @@ def infer_from_b64(image_b64: str, stem: str) -> None:
     model = load_efficientnet_v2_l(device)
 
     image = decode_image_b64(image_b64).to(device)
+
+    decoded_path = OUTPUTS / f"{stem}_decoded.npy"
+    decoded_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(decoded_path, decode_image_b64_to_numpy(image_b64))
+    print(f"saved decoded       : {decoded_path}")
 
     print(f"decoded tensor      : shape={tuple(image.shape)} dtype={image.dtype} "
           f"min={image.min():.4f} max={image.max():.4f}")

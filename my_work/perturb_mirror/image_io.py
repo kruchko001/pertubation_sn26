@@ -10,11 +10,16 @@ import torch
 from PIL import Image
 
 
-def decode_image_b64(image_b64: str) -> torch.Tensor:
+def decode_image_b64_to_numpy(image_b64: str) -> np.ndarray:
+    """PIL RGB float32 CHW in [0, 1] — same values as decode_image_b64()."""
     raw = base64.b64decode(image_b64)
     image = Image.open(io.BytesIO(raw)).convert("RGB")
     arr = np.asarray(image, dtype=np.float32) / 255.0
-    return torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return np.transpose(arr, (2, 0, 1)).copy()
+
+
+def decode_image_b64(image_b64: str) -> torch.Tensor:
+    return torch.from_numpy(decode_image_b64_to_numpy(image_b64)).contiguous()
 
 
 def encode_image_b64(image_chw: torch.Tensor) -> str:

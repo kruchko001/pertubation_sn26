@@ -3,14 +3,20 @@
 Build a local per-image cache of (clean_image_b64, logits) pairs
 that exactly match what the validator pipeline produces.
 
+Inference is done ONE IMAGE AT A TIME — exactly as the validator does:
+  predict_label(model, image_chw)  →  image_chw.unsqueeze(0)  →  PREPROCESS  →  model
+
+This matters because images have different resolutions; batching would
+require padding/resizing to a common size, which the validator never does.
+
 Pipeline per row (mirrors neurons/validator.py dev branch):
   HF dataset[row]["image"]
       → convert("RGB")
       → JPEG quality=95 → bytes
-      → base64                      ← clean_image_b64
-      → decode_image_b64            ← float [0,1] CHW
-      → EfficientNet PREPROCESS
-      → model forward               ← logits (1000-dim float32)
+      → base64                            ← clean_image_b64
+      → decode_image_b64 → CHW float      (one image, native resolution)
+      → image_chw.unsqueeze(0)            (batch size = 1)
+      → PREPROCESS → model forward        ← logits (1000-dim float32)
 
 Output: one JSON file per image
   data/imagenet100_samples/{row:07d}.json
@@ -18,7 +24,7 @@ Output: one JSON file per image
     "row": int,
     "image_id": str,
     "clean_image_b64": str,
-    "logits": [float, ...]   # 1000 values, raw EfficientNet output
+    "logits": [float, ...]   # 1000 raw EfficientNet values, pre-softmax
   }
 
 Files are gitignored — local only.
@@ -41,6 +47,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 
 MY_WORK = Path(__file__).resolve().parent.parent
 if str(MY_WORK) not in sys.path:
@@ -48,7 +55,10 @@ if str(MY_WORK) not in sys.path:
 
 from paths import IMAGENET100_SAMPLES_DIR
 from perturb_mirror.imagenet100_bootstrap import imagenet100_dataset_version, load_imagenet100
-from perturb_mirror.model import PREPROCESS, load_efficientnet_v2_l
+from perturb_mirror.model import (
+    load_efficientnet_v2_l,
+    logits_for_images,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,26 +84,31 @@ def row_to_clean_b64(pil_image) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def b64_to_tensor(clean_b64: str, device: torch.device) -> torch.Tensor:
+def clean_b64_to_chw(clean_b64: str, device: torch.device) -> torch.Tensor:
     """
     Mirrors decode_image_b64():
       base64 → JPEG bytes → PIL.open → RGB → float32 [0,1] CHW
+
+    Returns a single CHW tensor at the image's NATIVE resolution.
+    No resizing here — exactly like the validator.
     """
-    from PIL import Image
     raw = base64.b64decode(clean_b64)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     arr = np.asarray(img, dtype=np.float32) / 255.0
     return torch.from_numpy(arr).permute(2, 0, 1).contiguous().to(device)
 
 
-def get_logits(model: torch.nn.Module, tensor_chw: torch.Tensor) -> list[float]:
+def infer_one(model: torch.nn.Module, image_chw: torch.Tensor) -> list[float]:
     """
-    Run EfficientNet and return raw logits as a Python list of 1000 floats.
-    Mirrors the validator's model forward (PREPROCESS → model).
+    Mirrors predict_index() / predict_label() in perturbnet/model.py:
+      image_chw.unsqueeze(0)  →  PREPROCESS  →  model  →  logits
+
+    Batch size is exactly 1 — one image at a time, matching the validator.
     """
     with torch.no_grad():
-        logits = model(PREPROCESS(tensor_chw.unsqueeze(0)))
-    return logits.squeeze(0).cpu().tolist()
+        # unsqueeze(0): CHW → 1CHW  (batch of 1, native resolution)
+        logits = logits_for_images(model, image_chw.unsqueeze(0))
+    return logits.squeeze(0).cpu().tolist()   # → list of 1000 floats
 
 
 def out_path(out_dir: Path, row: int) -> Path:
@@ -119,9 +134,8 @@ def main() -> int:
 
     print("loading EfficientNet-V2-L …")
     model = load_efficientnet_v2_l(device)
-    model.eval()
 
-    # Rows to process
+    # Determine which rows to process
     rows_to_process = list(range(total_rows))
     if args.resume:
         rows_to_process = [r for r in rows_to_process
@@ -131,6 +145,7 @@ def main() -> int:
     if args.limit > 0:
         rows_to_process = rows_to_process[: args.limit]
     print(f"to write: {len(rows_to_process)} files")
+    print("inference: 1 image at a time (variable resolution, mirrors validator)")
 
     t0 = time.time()
     written = 0
@@ -138,21 +153,25 @@ def main() -> int:
 
     for i, row in enumerate(rows_to_process, start=1):
         try:
+            # Step 1: PIL → JPEG q=95 → base64  (validator: _imagenet100_image_bytes)
             pil_img = dataset[row]["image"]
             clean_b64 = row_to_clean_b64(pil_img)
-            tensor = b64_to_tensor(clean_b64, device)
-            logits = get_logits(model, tensor)
-            image_id = f"hf-{version}-{row:07d}"
 
+            # Step 2: base64 → CHW float at native resolution  (validator: decode_image_b64)
+            image_chw = clean_b64_to_chw(clean_b64, device)
+
+            # Step 3: CHW → unsqueeze(0) → PREPROCESS → model  (validator: predict_label)
+            # Batch size = 1, one image at a time
+            logits = infer_one(model, image_chw)
+
+            image_id = f"hf-{version}-{row:07d}"
             record = {
                 "row": row,
                 "image_id": image_id,
                 "clean_image_b64": clean_b64,
-                "logits": logits,          # 1000 raw float values
+                "logits": logits,
             }
-
-            fpath = out_path(args.out_dir, row)
-            fpath.write_text(
+            out_path(args.out_dir, row).write_text(
                 json.dumps(record, separators=(",", ":")),
                 encoding="utf-8",
             )

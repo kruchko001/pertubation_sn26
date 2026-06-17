@@ -38,19 +38,34 @@ MY_WORK = Path(__file__).resolve().parent.parent
 if str(MY_WORK) not in sys.path:
     sys.path.insert(0, str(MY_WORK))
 
-from paths import IMAGENET100_SAMPLES_DIR
+from paths import IMAGENET100_SAMPLES_DIR, IMAGENET100_VAL_SAMPLES_DIR
 from perturb_mirror.image_io import decode_image_b64_to_numpy
 from perturb_mirror.model import PREPROCESS, load_efficientnet_v2_l
 
 
+def samples_dir_for_split(hf_split: str) -> Path:
+    if hf_split == "train":
+        return IMAGENET100_SAMPLES_DIR
+    if hf_split in ("validation", "val"):
+        return IMAGENET100_VAL_SAMPLES_DIR
+    raise ValueError(f"unknown split: {hf_split}")
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Step 2: EfficientNet inference on .b64 files")
+    p.add_argument(
+        "--hf-split",
+        choices=["train", "validation"],
+        default="train",
+        help="Which prepared split directory to use (default: train)",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--workers", type=int, default=4,
                    help="DataLoader workers for parallel decode+PREPROCESS")
     p.add_argument("--resume", action="store_true",
                    help="Skip rows whose .json file already exists")
-    p.add_argument("--data-dir", type=Path, default=IMAGENET100_SAMPLES_DIR)
+    p.add_argument("--data-dir", type=Path, default=None,
+                   help="Override samples directory")
     p.add_argument("--log-every", type=int, default=100,
                    help="Print progress every N batches")
     return p.parse_args()
@@ -94,12 +109,13 @@ class B64Dataset(Dataset):
 
 def main() -> int:
     args = parse_args()
+    args.data_dir = args.data_dir or samples_dir_for_split(args.hf_split)
 
     # Collect all .b64 files
     all_b64 = sorted(args.data_dir.glob("???????.b64"))
     if not all_b64:
         print(f"ERROR: no .b64 files found in {args.data_dir}")
-        print("Run step 1 first:  python scripts/save_images.py")
+        print(f"Run step 1 first:  python scripts/save_images.py --hf-split {args.hf_split}")
         return 1
 
     rows_all = [int(p.stem) for p in all_b64]
@@ -111,6 +127,9 @@ def main() -> int:
               f"{len(rows_todo)} remaining")
     else:
         rows_todo = rows_all
+
+    print(f"split   : {args.hf_split}")
+    print(f"data_dir: {args.data_dir}")
 
     print(f"images  : {len(rows_todo)}")
     print(f"batch   : {args.batch_size}")

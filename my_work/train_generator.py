@@ -30,7 +30,7 @@ if str(MY_WORK) not in sys.path:
 
 from bucketing import BucketBatchSampler, bucket_collate, build_shape_index
 from challenge_io import load_imagenet100_dataset
-from generator import Generator
+from generator import Generator, load_generator_checkpoint
 from label_cache import load_true_label_index
 from model_utils import load_frozen_classifier
 from paths import DATA, IMAGENET100_SAMPLES_DIR, OUTPUTS
@@ -129,6 +129,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w-psnr", type=float, default=0.05, help="[reward] PSNR gate hinge weight")
     parser.add_argument("--max-linf", type=float, default=MAX_LINF_DELTA,
                         help=f"Generator L-inf cap (default={MAX_LINF_DELTA}, validator max)")
+    parser.add_argument("--gen-base", type=int, default=48,
+                        help="Generator base channel width (capacity; e.g. 32/48/64)")
     parser.add_argument("--limit", type=int, default=0, help="Max train rows (0=full split)")
     parser.add_argument("--batch-size", type=int, default=16,
                         help="Max images per batch (same-resolution buckets)")
@@ -155,6 +157,10 @@ def parse_args() -> argparse.Namespace:
                         help="Fixed epsilon for validation gates (validator samples 0.06-0.2)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save", type=Path, default=OUTPUTS / "generator.pt")
+    parser.add_argument("--load", type=Path, default=None,
+                        help="Pre-trained checkpoint to fine-tune (generator_state from a prior run)")
+    parser.add_argument("--resume", action="store_true",
+                        help="With --load: continue best-score tracking from checkpoint val score")
     parser.add_argument("--log-every", type=int, default=3)
     parser.add_argument("--val-every", type=int, default=1,
                         help="Run validation every N epochs (always on the last epoch)")
@@ -164,6 +170,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true",
                         help="torch.compile the classifier (480x480 fixed shape; may be "
                              "unavailable on Windows -> falls back gracefully)")
+    parser.add_argument("--grad-checkpoint", action="store_true",
+                        help="Gradient-checkpoint the classifier (saves VRAM, ~20-30%% slower)")
+    parser.add_argument("--checkpoint-segments", type=int, default=4,
+                        help="Number of checkpoint_sequential segments over model.features")
     return parser.parse_args()
 
 
@@ -280,10 +290,30 @@ def main() -> int:
     print(f"workers/prefetch    : {args.workers}/{args.prefetch_factor}")
     print(f"fast decode (npy/b64): {'disabled' if args.no_b64_cache else 'enabled'}")
 
-    generator = Generator(max_linf=args.max_linf).to(device)
-    optimizer = torch.optim.Adam(generator.parameters(), lr=args.lr)
+    generator = Generator(max_linf=args.max_linf, base=args.gen_base).to(device)
+    n_params = sum(p.numel() for p in generator.parameters())
+    print(f"generator           : base={args.gen_base}  params={n_params/1e6:.2f}M")
 
     best_score = -1.0
+    if args.load is not None:
+        ckpt = load_generator_checkpoint(generator, args.load)
+        print(f"loaded checkpoint   : {ckpt['path']}")
+        if "epoch" in ckpt:
+            print(f"  saved epoch       : {ckpt['epoch']}")
+        if "max_linf" in ckpt:
+            print(f"  saved max_linf    : {ckpt['max_linf']}")
+        if "val" in ckpt and isinstance(ckpt["val"], dict):
+            v = ckpt["val"]
+            print(
+                f"  saved val         : score={v.get('score_mean', 0):.4f}  "
+                f"pass={v.get('pass_rate', 0):.3f}  flip={v.get('flip_rate', 0):.3f}"
+            )
+            if args.resume:
+                best_score = float(v.get("score_mean", -1.0))
+                print(f"  resume best_score : {best_score:.4f}")
+
+    optimizer = torch.optim.Adam(generator.parameters(), lr=args.lr)
+
     args.save.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):

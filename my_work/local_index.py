@@ -1,9 +1,12 @@
 """Local-only index helpers: discover .npy rows and load cached shape/label maps.
 
 No Hugging Face dependency. Training uses:
-  data/imagenet100_samples/{row:07d}.npy          float32 CHW [0,1]
+  data/imagenet100_samples/{row:07d}.npy          float32 CHW [0,1]  (train split)
+  data/imagenet100_val_samples/{row:07d}.npy      float32 CHW [0,1]  (HF validation split)
   data/imagenet100_shapes.json                    {version, shapes: {row: [H,W]}}
   data/imagenet100_true_labels.json               {version, labels: {row: idx}}
+  data/imagenet100_val_shapes.json                validation shapes
+  data/imagenet100_val_true_labels.json           validation labels
 """
 
 from __future__ import annotations
@@ -15,6 +18,16 @@ from typing import Sequence
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from perturb_mirror.constants import IMAGENET100_REPO_ID
+
+
+def dataset_version(split: str, num_rows: int) -> str:
+    """Stable version id for a prepared split (matches imagenet100_dataset_version)."""
+    import hashlib
+
+    base = f"{IMAGENET100_REPO_ID}:{split}:{int(num_rows)}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
 
 
 def discover_npy_rows(samples_dir: Path) -> list[int]:
@@ -118,3 +131,67 @@ class NpyDataset(Dataset):
         tensor = torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float32))
         label = int(self.labels[row])
         return tensor, label
+
+
+def _write_json_cache(path: Path, version: str, key: str, mapping: dict[int, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": version, key: {str(k): v for k, v in mapping.items()}}
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+
+
+def build_shape_index_from_npy(
+    samples_dir: Path,
+    rows: Sequence[int],
+    cache_path: Path,
+    version: str,
+    *,
+    log_every: int = 5000,
+) -> dict[int, tuple[int, int]]:
+    """Build {row: (H, W)} from .npy files and write consolidated cache."""
+    shapes: dict[int, tuple[int, int]] = {}
+    rows_list = [int(r) for r in rows]
+    for i, row in enumerate(rows_list, start=1):
+        npy_path = samples_dir / f"{row:07d}.npy"
+        if not npy_path.is_file():
+            continue
+        arr = np.load(npy_path, mmap_mode="r")
+        if arr.ndim != 3:
+            raise ValueError(f"row {row}: expected CHW npy, got shape {arr.shape}")
+        shapes[row] = (int(arr.shape[1]), int(arr.shape[2]))
+        if log_every > 0 and i % log_every == 0:
+            print(f"  shapes [{i}/{len(rows_list)}]")
+    _write_json_cache(cache_path, version, "shapes", {k: list(v) for k, v in shapes.items()})
+    print(f"shape index: wrote {cache_path} ({len(shapes)} rows)")
+    return shapes
+
+
+def build_label_index_from_json(
+    samples_dir: Path,
+    rows: Sequence[int],
+    cache_path: Path,
+    version: str,
+    *,
+    log_every: int = 5000,
+) -> dict[int, int]:
+    """Build {row: true_label_index} from per-row inference .json and write cache."""
+    labels: dict[int, int] = {}
+    rows_list = [int(r) for r in rows]
+    missing = 0
+    for i, row in enumerate(rows_list, start=1):
+        json_path = samples_dir / f"{row:07d}.json"
+        if not json_path.is_file():
+            missing += 1
+            continue
+        try:
+            rec = json.loads(json_path.read_text(encoding="utf-8"))
+            labels[row] = int(np.argmax(rec["logits"]))
+        except Exception:
+            missing += 1
+            continue
+        if log_every > 0 and i % log_every == 0:
+            print(f"  labels [{i}/{len(rows_list)}]")
+    if missing:
+        print(f"label index: skipped {missing} rows (no .json or bad file)")
+    _write_json_cache(cache_path, version, "labels", labels)
+    print(f"label index: wrote {cache_path} ({len(labels)} rows)")
+    return labels

@@ -37,19 +37,35 @@ MY_WORK = Path(__file__).resolve().parent.parent
 if str(MY_WORK) not in sys.path:
     sys.path.insert(0, str(MY_WORK))
 
-from paths import IMAGENET100_SAMPLES_DIR
+from paths import IMAGENET100_SAMPLES_DIR, IMAGENET100_VAL_SAMPLES_DIR
+from perturb_mirror.constants import IMAGENET100_REPO_ID, IMAGENET100_SPLIT
 from perturb_mirror.imagenet100_bootstrap import imagenet100_dataset_version, load_imagenet100
+
+
+def samples_dir_for_split(hf_split: str) -> Path:
+    if hf_split == "train":
+        return IMAGENET100_SAMPLES_DIR
+    if hf_split in ("validation", "val"):
+        return IMAGENET100_VAL_SAMPLES_DIR
+    raise ValueError(f"unknown split: {hf_split}")
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Step 1: save clean_image_b64 files")
+    p.add_argument(
+        "--hf-split",
+        choices=["train", "validation"],
+        default="train",
+        help="Hugging Face split to export (default: train)",
+    )
     p.add_argument("--workers", type=int, default=4,
                    help="Parallel threads for JPEG encode (default: 4)")
     p.add_argument("--limit", type=int, default=0,
-                   help="Max rows to process (0 = full ~126k)")
+                   help="Max rows to process (0 = full split)")
     p.add_argument("--resume", action="store_true",
                    help="Skip rows whose .b64 file already exists")
-    p.add_argument("--out-dir", type=Path, default=IMAGENET100_SAMPLES_DIR)
+    p.add_argument("--out-dir", type=Path, default=None,
+                   help="Output directory (default: data/imagenet100_*_samples by split)")
     p.add_argument("--log-every", type=int, default=1000)
     return p.parse_args()
 
@@ -71,16 +87,20 @@ def process_one(dataset, row: int, out_dir: Path) -> int:
 
 def main() -> int:
     args = parse_args()
+    hf_split = args.hf_split
+    args.out_dir = args.out_dir or samples_dir_for_split(hf_split)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print("loading ImageNet-100 dataset …")
-    dataset = load_imagenet100()
+    dataset = load_imagenet100(repo_id=IMAGENET100_REPO_ID, split=hf_split)
     version = imagenet100_dataset_version(
         dataset=dataset,
-        repo_id="clane9/imagenet-100",
-        split="train",
+        repo_id=IMAGENET100_REPO_ID,
+        split=hf_split,
     )
     total_rows = int(dataset.num_rows)
+    print(f"split   : {hf_split}")
+    print(f"out_dir : {args.out_dir}")
     print(f"dataset : {total_rows} rows  version={version}")
 
     rows_to_process = list(range(total_rows))
@@ -125,7 +145,7 @@ def main() -> int:
     elapsed = time.time() - t0
     print(f"\ndone  written={written}  errors={errors}  "
           f"elapsed={elapsed/60:.1f} min")
-    print(f"next  : python scripts/run_inference.py")
+    print(f"next  : python scripts/run_inference.py --hf-split {hf_split}")
     return 0
 
 

@@ -16,6 +16,8 @@ Perturb/
 # Large local datasets (ImageNet-100 exports)
 my_work/data/imagenet100_samples/**/*
 !my_work/data/imagenet100_samples/.gitkeep
+my_work/data/imagenet100_val_samples/**/*
+!my_work/data/imagenet100_val_samples/.gitkeep
 
 # Logs
 my_work/logs/

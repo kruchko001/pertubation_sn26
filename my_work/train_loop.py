@@ -42,6 +42,8 @@ def train_one_epoch(
     steps = 0
 
     channels_last = (not args.no_channels_last) and device.type == "cuda"
+    grad_checkpoint = bool(getattr(args, "grad_checkpoint", False))
+    checkpoint_segments = int(getattr(args, "checkpoint_segments", 4))
 
     pbar = tqdm(loader, desc=desc, dynamic_ncols=True, leave=True)
     for step, (clean, labels) in enumerate(pbar, start=1):
@@ -53,7 +55,12 @@ def train_one_epoch(
             labels = torch.where(labels < 0, computed, labels)
         target_idx = labels
 
-        logits, adv_quant = forward_adv(classifier, generator, clean, channels_last=channels_last)
+        logits, adv_quant = forward_adv(
+            classifier, generator, clean,
+            channels_last=channels_last,
+            grad_checkpoint=grad_checkpoint,
+            checkpoint_segments=checkpoint_segments,
+        )
 
         if args.loss == "reward":
             loss, comps = reward_aligned_loss(

@@ -47,7 +47,8 @@ def quantize_ste(image_bchw: torch.Tensor) -> torch.Tensor:
 # ─── Validator preprocess ─────────────────────────────────────────────────────
 
 def apply_validator_preprocess(image_bchw: torch.Tensor) -> torch.Tensor:
-    """Resize + crop to 480 + ImageNet normalise — same as PREPROCESS."""
+    """Validator's exact pipeline: resize->480, center-crop->480, BICUBIC,
+    normalize with mean=std=0.5 (NOT ImageNet stats). Reuses PREPROCESS."""
     return PREPROCESS(image_bchw)
 
 
@@ -277,11 +278,37 @@ def reward_aligned_loss(
 
 # ─── Full forward pass ────────────────────────────────────────────────────────
 
+def _classifier_forward_checkpointed(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    segments: int = 4,
+) -> torch.Tensor:
+    """EfficientNet forward with gradient checkpointing over the feature blocks.
+
+    Activations of `model.features` are dropped on the forward pass and
+    recomputed during backward, trading compute for a large VRAM reduction.
+    Safe because the classifier is frozen + in eval mode (BN uses running stats,
+    dropout is identity), so the recomputation is deterministic.
+    """
+    from torch.utils.checkpoint import checkpoint_sequential
+
+    core = getattr(model, "_orig_mod", model)  # unwrap torch.compile if present
+    if not hasattr(core, "features"):
+        return model(x)  # unknown architecture -> no checkpointing
+
+    x = checkpoint_sequential(core.features, segments, x, use_reentrant=False)
+    x = core.avgpool(x)
+    x = torch.flatten(x, 1)
+    return core.classifier(x)
+
+
 def forward_adv(
     model: torch.nn.Module,
     generator: torch.nn.Module,
     clean_bchw: torch.Tensor,
     channels_last: bool = False,
+    grad_checkpoint: bool = False,
+    checkpoint_segments: int = 4,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generator → STE quantize → PREPROCESS → logits.
@@ -294,7 +321,10 @@ def forward_adv(
     model_in = apply_validator_preprocess(adv_quant)
     if channels_last:
         model_in = model_in.contiguous(memory_format=torch.channels_last)
-    logits = model(model_in)
+    if grad_checkpoint and torch.is_grad_enabled():
+        logits = _classifier_forward_checkpointed(model, model_in, checkpoint_segments)
+    else:
+        logits = model(model_in)
     return logits, adv_quant
 
 

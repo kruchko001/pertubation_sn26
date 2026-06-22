@@ -21,7 +21,22 @@ Rebuild train indexes after adding files:
   python scripts/build_indexes.py --split train
 
 Usage (from my_work/):
-  python train_generator_local.py --use-hf-val --epochs 30 --batch-size 4 --workers 8
+  # default: train-only, NO per-epoch validation, best checkpoint by train score
+  python train_generator_local.py --epochs 30 --batch-size 4 --workers 8
+
+  # opt back into per-epoch validation on the HF val split:
+  python train_generator_local.py --val --use-hf-val --epochs 30 --batch-size 4
+
+  # LTP-style: feature-separation flip driver (keeps reward L-inf/SSIM/PSNR terms),
+  # tap a mid-level EfficientNetV2-L block; sweep --feat-layers / --w-feat to tune:
+  python train_generator_local.py --loss feat --feat-layers 4 --w-feat 10 --epochs 30
+
+  # LTP ResNet generator instead of the U-Net (LTP uses base=64):
+  python train_generator_local.py --gen-arch resnet --gen-base 64 --loss feat --feat-layers 4
+
+  # margin-CW flip + MAE perturbation restriction (L-inf<=1/255 from generator,
+  # min-L-inf floor protects the 0.003 gate); tune --w-mae to trade flip vs size:
+  python train_generator_local.py --loss mae --w-mae 100 --epochs 30 --batch-size 4
 """
 
 from __future__ import annotations
@@ -40,7 +55,7 @@ if str(MY_WORK) not in sys.path:
     sys.path.insert(0, str(MY_WORK))
 
 from bucketing import BucketBatchSampler, bucket_collate
-from generator import Generator, load_generator_checkpoint
+from generator import build_generator, load_generator_checkpoint
 from local_index import (
     NpyDataset,
     discover_npy_rows,
@@ -67,7 +82,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--loss", choices=["reward", "legacy"], default="reward")
+    parser.add_argument("--loss", choices=["reward", "legacy", "feat", "mae"], default="reward",
+                        help="reward=margin-CW flip driver; feat=LTP mid-level "
+                             "feature-separation flip driver (keeps reward L-inf/SSIM/PSNR "
+                             "terms); mae=margin-CW flip driver + MAE perturbation restriction "
+                             "+ min-L-inf floor (L-inf<=1/255 enforced by the generator); "
+                             "legacy=plain CW+SSIM+PSNR")
     parser.add_argument("--ssim-weight", type=float, default=10.0)
     parser.add_argument("--psnr-weight", type=float, default=5.0)
     parser.add_argument("--cw-confidence", type=float, default=6.0)
@@ -78,11 +98,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w-floor", type=float, default=80.0)
     parser.add_argument("--w-ssim", type=float, default=60.0)
     parser.add_argument("--w-psnr", type=float, default=0.05)
+    parser.add_argument("--w-mae", type=float, default=100.0,
+                        help="With --loss mae: weight on the MAE (mean |perturbation|) "
+                             "restriction term (flip-gated). MAE is on the ~[0,1/255] scale "
+                             "so this needs to be large to balance the margin-CW flip term.")
     parser.add_argument("--max-linf", type=float, default=MAX_LINF_DELTA)
+    parser.add_argument("--gen-arch", choices=["unet", "resnet"], default="unet",
+                        help="Generator architecture: unet (default, resolution-agnostic) "
+                             "or resnet (LTP GeneratorResnet port)")
     parser.add_argument("--gen-base", type=int, default=48,
-                        help="Generator base channel width (capacity; e.g. 32/48/64)")
+                        help="Generator base channel width (capacity; e.g. 32/48/64). "
+                             "LTP uses 64 for the resnet arch.")
+    parser.add_argument("--gen-dropout", type=float, default=0.0,
+                        help="Dropout in resnet generator residual blocks (LTP used 0.5)")
+    parser.add_argument("--feat-layers", type=str, default="4",
+                        help="With --loss feat: comma-separated EfficientNetV2-L feature "
+                             "block indices to separate (0..8; mid-level ~3-5)")
+    parser.add_argument("--w-feat", type=float, default=10.0,
+                        help="With --loss feat: weight on the (normalised) feature-separation "
+                             "flip driver")
+    parser.add_argument("--feat-normalize", action=argparse.BooleanOptionalAction, default=True,
+                        help="Normalise each layer's feature distance by clean feature energy "
+                             "(stable w_feat across layers; default on)")
     parser.add_argument("--limit", type=int, default=0, help="Max rows (0 = all .npy)")
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--max-pixels", type=int, default=0)
     parser.add_argument("--drop-last", action="store_true")
     parser.add_argument("--workers", type=int, default=8)
@@ -90,8 +129,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-dir", type=Path, default=IMAGENET100_SAMPLES_DIR)
     parser.add_argument("--shape-cache", type=Path, default=IMAGENET100_SHAPES_CACHE)
     parser.add_argument("--label-cache", type=Path, default=IMAGENET100_LABELS_CACHE)
+    parser.add_argument("--val", action=argparse.BooleanOptionalAction, default=False,
+                        help="Run per-epoch validation (default OFF; the dataset is train-only). "
+                             "Use --val to enable, --no-val to keep it off.")
     parser.add_argument("--use-hf-val", action="store_true",
-                        help="Validate on HF validation split (data/imagenet100_val_samples)")
+                        help="With --val: validate on HF validation split (data/imagenet100_val_samples)")
     parser.add_argument("--val-samples-dir", type=Path, default=IMAGENET100_VAL_SAMPLES_DIR)
     parser.add_argument("--val-shape-cache", type=Path, default=IMAGENET100_VAL_SHAPES_CACHE)
     parser.add_argument("--val-label-cache", type=Path, default=IMAGENET100_VAL_LABELS_CACHE)
@@ -112,16 +154,32 @@ def parse_args() -> argparse.Namespace:
                         help="Gradient-checkpoint the classifier (saves VRAM, ~20-30%% slower)")
     parser.add_argument("--checkpoint-segments", type=int, default=4,
                         help="Number of checkpoint_sequential segments over model.features")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.feat_layers = tuple(
+        int(x) for x in str(args.feat_layers).replace(" ", "").split(",") if x != ""
+    )
+    if args.loss == "feat" and not args.feat_layers:
+        parser.error("--loss feat requires at least one --feat-layers index")
+    return args
 
 
 def print_train_summary(args: argparse.Namespace, train_stats: dict[str, float]) -> None:
-    if args.loss == "reward":
+    if args.loss in ("reward", "feat"):
+        fdist = f" fdist={train_stats['feat_dist']:.4f}" if "feat_dist" in train_stats else ""
         print(
             f"train  loss={train_stats['loss']:.4f} | "
             f"flip={train_stats['flip']:.4f} score={train_stats['score']:.4f} "
             f"floor={train_stats['floor']:.4f} ssim_h={train_stats['ssim_h']:.4f} "
-            f"psnr_h={train_stats['psnr_h']:.4f} | "
+            f"psnr_h={train_stats['psnr_h']:.4f}{fdist} | "
+            f"flip_rate={train_stats['flip_rate']:.3f} "
+            f"pert_score={train_stats['pert_score']:.4f} "
+            f"linf_mean={train_stats['linf_mean']:.5f}"
+        )
+    elif args.loss == "mae":
+        print(
+            f"train  loss={train_stats['loss']:.4f} | "
+            f"flip={train_stats['flip']:.4f} mae={train_stats['mae']:.5f} "
+            f"floor={train_stats['floor']:.4f} | "
             f"flip_rate={train_stats['flip_rate']:.3f} "
             f"pert_score={train_stats['pert_score']:.4f} "
             f"linf_mean={train_stats['linf_mean']:.5f}"
@@ -133,6 +191,20 @@ def print_train_summary(args: argparse.Namespace, train_stats: dict[str, float])
             f"ssim_loss={train_stats['ssim']:.5f}  "
             f"psnr_mse={train_stats['psnr']:.6f}"
         )
+
+
+def compute_train_score(args: argparse.Namespace, train_stats: dict[str, float]) -> float:
+    """Scalar checkpoint-selection metric from TRAIN stats (higher is better).
+
+    With validation off we still need to pick the best epoch. For the reward
+    loss we use a validator-aligned proxy: only flipped images earn their
+    perturbation score, so ``flip_rate * pert_score`` tracks the on-chain reward
+    without a held-out split. For the legacy loss (no score notion) we fall back
+    to negative loss.
+    """
+    if args.loss in ("reward", "feat", "mae"):
+        return float(train_stats.get("flip_rate", 0.0) * train_stats.get("pert_score", 0.0))
+    return -float(train_stats.get("loss", float("inf")))
 
 
 def main() -> int:
@@ -160,35 +232,43 @@ def main() -> int:
     if args.limit > 0:
         train_indices = train_indices[: args.limit]
 
-    use_hf_val = args.use_hf_val
-    if use_hf_val:
-        try:
-            val_indices = discover_npy_rows(args.val_samples_dir)
-        except FileNotFoundError:
-            print(f"ERROR: --use-hf-val but no .npy in {args.val_samples_dir}")
-            print("Run: python scripts/prepare_dataset.py --split validation --workers 8")
-            return 1
-        if not val_indices:
-            print(f"ERROR: --use-hf-val but {args.val_samples_dir} is empty")
-            return 1
-        val_samples_dir = args.val_samples_dir
-        val_shape_cache = args.val_shape_cache
-        val_label_cache = args.val_label_cache
-        print(f"val source          : HF validation split")
-        print(f"val npy files       : {len(val_indices)}")
-        print(f"val samples_dir     : {val_samples_dir}")
+    # Validation is OFF by default: the dataset is train-only, so we train on
+    # ALL train rows and select the checkpoint by train score. Pass --val to
+    # re-enable per-epoch validation (HF val split with --use-hf-val, else a
+    # random holdout carved from the train rows).
+    val_indices: list[int] = []
+    val_samples_dir = args.val_samples_dir
+    val_shape_cache = args.val_shape_cache
+    val_label_cache = args.val_label_cache
+    if args.val:
+        if args.use_hf_val:
+            try:
+                val_indices = discover_npy_rows(args.val_samples_dir)
+            except FileNotFoundError:
+                print(f"ERROR: --val --use-hf-val but no .npy in {args.val_samples_dir}")
+                print("Run: python scripts/prepare_dataset.py --split validation --workers 8")
+                return 1
+            if not val_indices:
+                print(f"ERROR: --val --use-hf-val but {args.val_samples_dir} is empty")
+                return 1
+            print(f"val source          : HF validation split")
+            print(f"val npy files       : {len(val_indices)}")
+            print(f"val samples_dir     : {val_samples_dir}")
+        else:
+            val_count = max(1, int(len(train_indices) * args.val_fraction))
+            val_indices, train_indices = train_indices[:val_count], train_indices[val_count:]
+            val_samples_dir = args.samples_dir
+            val_shape_cache = args.shape_cache
+            val_label_cache = args.label_cache
+            print(f"val source          : random holdout ({args.val_fraction:.0%} of train npy)")
     else:
-        val_count = max(1, int(len(train_indices) * args.val_fraction))
-        val_indices, train_indices = train_indices[:val_count], train_indices[val_count:]
-        val_samples_dir = args.samples_dir
-        val_shape_cache = args.shape_cache
-        val_label_cache = args.label_cache
-        print(f"val source          : random holdout ({args.val_fraction:.0%} of train npy)")
+        print(f"val source          : disabled (--no-val) -> best checkpoint by train score")
 
     print(f"train rows          : {len(train_indices)}")
     print(f"val rows            : {len(val_indices)}")
 
-    max_pixels = args.max_pixels if args.max_pixels > 0 else args.batch_size * 240 * 240
+    # max_pixels = args.max_pixels if args.max_pixels > 0 else args.batch_size * 240 * 240
+    max_pixels = args.max_pixels if args.max_pixels > 0 else None
     print(f"batch_size          : {args.batch_size}")
     print(f"max_pixels (cap)    : {max_pixels}")
 
@@ -198,32 +278,16 @@ def main() -> int:
     print(f"train shape cache   : {len(shape_index)}/{len(used_train_rows)} rows")
     print(f"train label cache   : {len(labels_map)}/{len(used_train_rows)} rows")
 
-    val_shape_index = load_shape_index(val_shape_cache, val_indices)
-    val_labels_map = load_label_index(val_label_cache, val_indices)
-    print(f"val shape cache     : {len(val_shape_index)}/{len(val_indices)} rows")
-    print(f"val label cache     : {len(val_labels_map)}/{len(val_indices)} rows")
-
     train_shapes = [shape_index[r] for r in train_indices]
-    val_shapes = [val_shape_index[r] for r in val_indices]
-
     train_sampler = BucketBatchSampler(
         train_shapes,
         batch_size=args.batch_size,
-        max_pixels=max_pixels,
+        max_pixels=None,
         shuffle=True,
         drop_last=args.drop_last,
         seed=args.seed,
     )
-    val_sampler = BucketBatchSampler(
-        val_shapes,
-        batch_size=args.batch_size,
-        max_pixels=max_pixels,
-        shuffle=False,
-        drop_last=False,
-        seed=args.seed,
-    )
     print(f"train buckets       : {train_sampler.describe()}")
-    print(f"val buckets         : {val_sampler.describe()}")
 
     loader_kwargs = dict(
         num_workers=args.workers,
@@ -238,11 +302,28 @@ def main() -> int:
         batch_sampler=train_sampler,
         **loader_kwargs,
     )
-    val_loader = DataLoader(
-        NpyDataset(val_indices, val_samples_dir, val_labels_map),
-        batch_sampler=val_sampler,
-        **loader_kwargs,
-    )
+
+    val_loader = None
+    if args.val:
+        val_shape_index = load_shape_index(val_shape_cache, val_indices)
+        val_labels_map = load_label_index(val_label_cache, val_indices)
+        print(f"val shape cache     : {len(val_shape_index)}/{len(val_indices)} rows")
+        print(f"val label cache     : {len(val_labels_map)}/{len(val_indices)} rows")
+        val_shapes = [val_shape_index[r] for r in val_indices]
+        val_sampler = BucketBatchSampler(
+            val_shapes,
+            batch_size=args.batch_size,
+            max_pixels=None,
+            shuffle=False,
+            drop_last=False,
+            seed=args.seed,
+        )
+        print(f"val buckets         : {val_sampler.describe()}")
+        val_loader = DataLoader(
+            NpyDataset(val_indices, val_samples_dir, val_labels_map),
+            batch_sampler=val_sampler,
+            **loader_kwargs,
+        )
 
     classifier = load_frozen_classifier(device)
     if device.type == "cuda" and not args.no_channels_last:
@@ -257,9 +338,18 @@ def main() -> int:
     print(f"dtype               : float32")
     print(f"workers/prefetch    : {args.workers}/{args.prefetch_factor}")
 
-    generator = Generator(max_linf=args.max_linf, base=args.gen_base).to(device)
+    generator = build_generator(
+        args.gen_arch,
+        max_linf=1.0/255.0,
+        base=args.gen_base,
+        gen_dropout=args.gen_dropout,
+    ).to(device)
     n_params = sum(p.numel() for p in generator.parameters())
-    print(f"generator           : base={args.gen_base}  params={n_params/1e6:.2f}M")
+    print(f"generator           : arch={args.gen_arch}  base={args.gen_base}  "
+          f"params={n_params/1e6:.2f}M")
+    if args.loss == "feat":
+        print(f"feat flip driver    : layers={args.feat_layers}  w_feat={args.w_feat}  "
+              f"normalize={args.feat_normalize}")
 
     best_score = -1.0
     if args.load is not None:
@@ -275,9 +365,16 @@ def main() -> int:
                 f"  saved val         : score={v.get('score_mean', 0):.4f}  "
                 f"pass={v.get('pass_rate', 0):.3f}  flip={v.get('flip_rate', 0):.3f}"
             )
-            if args.resume:
-                best_score = float(v.get("score_mean", -1.0))
-                print(f"  resume best_score : {best_score:.4f}")
+        if "train_score" in ckpt:
+            print(f"  saved train score : {float(ckpt['train_score']):.4f}")
+        if args.resume:
+            # Resume the best-tracking metric that matches the CURRENT mode so we
+            # don't compare a val score against a train score.
+            if args.val and isinstance(ckpt.get("val"), dict):
+                best_score = float(ckpt["val"].get("score_mean", -1.0))
+            elif (not args.val) and ("train_score" in ckpt):
+                best_score = float(ckpt["train_score"])
+            print(f"  resume best_score : {best_score:.4f}")
 
     optimizer = torch.optim.Adam(generator.parameters(), lr=args.lr)
 
@@ -297,31 +394,48 @@ def main() -> int:
         )
         print_train_summary(args, train_stats)
 
-        run_val = (epoch % max(1, args.val_every) == 0) or (epoch == args.epochs)
-        if not run_val:
-            continue
-
-        val_stats = validate(generator, classifier, val_loader, device, epsilon=args.val_epsilon)
-        print(
-            f"val    score={val_stats['score_mean']:.4f}  "
-            f"pass_rate={val_stats['pass_rate']:.3f}  "
-            f"flip_rate={val_stats['flip_rate']:.3f}  "
-            f"ssim={val_stats['ssim_mean']:.4f}  "
-            f"psnr={val_stats['psnr_mean']:.2f} dB"
-        )
-
-        if val_stats["score_mean"] > best_score:
-            best_score = val_stats["score_mean"]
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "max_linf": args.max_linf,
-                    "generator_state": generator.state_dict(),
-                    "val": val_stats,
-                },
-                args.save,
+        if val_loader is not None:
+            run_val = (epoch % max(1, args.val_every) == 0) or (epoch == args.epochs)
+            if not run_val:
+                continue
+            val_stats = validate(generator, classifier, val_loader, device, epsilon=args.val_epsilon)
+            print(
+                f"val    score={val_stats['score_mean']:.4f}  "
+                f"pass_rate={val_stats['pass_rate']:.3f}  "
+                f"flip_rate={val_stats['flip_rate']:.3f}  "
+                f"ssim={val_stats['ssim_mean']:.4f}  "
+                f"psnr={val_stats['psnr_mean']:.2f} dB"
             )
-            print(f"saved  -> {args.save}  (score={best_score:.4f})")
+            if val_stats["score_mean"] > best_score:
+                best_score = val_stats["score_mean"]
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "max_linf": args.max_linf,
+                        "gen_arch": args.gen_arch,
+                        "generator_state": generator.state_dict(),
+                        "val": val_stats,
+                    },
+                    args.save,
+                )
+                print(f"saved  -> {args.save}  (val score={best_score:.4f})")
+        else:
+            # No validation: select the best epoch by the train-score proxy.
+            train_score = compute_train_score(args, train_stats)
+            if train_score > best_score:
+                best_score = train_score
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "max_linf": args.max_linf,
+                        "gen_arch": args.gen_arch,
+                        "generator_state": generator.state_dict(),
+                        "train": train_stats,
+                        "train_score": train_score,
+                    },
+                    args.save,
+                )
+                print(f"saved  -> {args.save}  (train score={best_score:.4f})")
 
     return 0
 

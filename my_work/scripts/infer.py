@@ -69,7 +69,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run validator-style EfficientNet inference")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("image_path", nargs="?", help="Local image path")
-    source.add_argument("--imagenet100-row", type=int, help="ImageNet-100 train row index")
+    source.add_argument("--imagenet100-row", type=int, help="ImageNet-100 train row index", default=0)
     args = parser.parse_args()
 
     if args.imagenet100_row is not None:

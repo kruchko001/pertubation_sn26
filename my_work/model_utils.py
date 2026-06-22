@@ -52,6 +52,74 @@ def apply_validator_preprocess(image_bchw: torch.Tensor) -> torch.Tensor:
     return PREPROCESS(image_bchw)
 
 
+def compute_preprocess_alive_mask(
+    image_bchw: torch.Tensor,
+    *,
+    grad_eps: float = 1e-9,
+) -> torch.Tensor:
+    """Pixels that influence EfficientNet through validator PREPROCESS.
+
+    After resize+center-crop, border pixels can be discarded entirely; they
+    receive zero gradient and cannot help a flip, but still inflate RMSE if
+    perturbed. Returns a B×1×H×W float mask (1.0 = alive, 0.0 = dead).
+    """
+    x = image_bchw.detach().clone().requires_grad_(True)
+    y = apply_validator_preprocess(x)
+    y.sum().backward()
+    mag = x.grad.abs().amax(dim=1, keepdim=True)
+    return (mag > grad_eps).to(dtype=image_bchw.dtype, device=image_bchw.device)
+
+
+def apply_alive_mask(delta_bchw: torch.Tensor, alive_b1hw: torch.Tensor | None) -> torch.Tensor:
+    if alive_b1hw is None:
+        return delta_bchw
+    return delta_bchw * alive_b1hw
+
+
+# Validator PREPROCESS uses mean=std=0.5 (see perturb_mirror.model.PREPROCESS / WEIGHTS.transforms())
+def _preprocess_mean_std(device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    from perturb_mirror.model import PREPROCESS
+
+    mean = torch.tensor(PREPROCESS.mean, device=device, dtype=dtype).view(1, 3, 1, 1)
+    std = torch.tensor(PREPROCESS.std, device=device, dtype=dtype).view(1, 3, 1, 1)
+    return mean, std
+
+
+def denormalize_effnet_preprocess(normalized_bchw: torch.Tensor) -> torch.Tensor:
+    """Invert validator PREPROCESS normalization back to RGB (may exceed [0, 1] slightly)."""
+    mean, std = _preprocess_mean_std(normalized_bchw.device, normalized_bchw.dtype)
+    return normalized_bchw * std + mean
+
+
+def extract_effnet_feed_bchw(image_bchw: torch.Tensor) -> torch.Tensor:
+    """480×480 RGB patch that enters EfficientNet after resize + center crop.
+
+    Uses the same geometry as ``PREPROCESS`` (resize 480, center crop 480, BICUBIC)
+    on pixel values in [0, 1], *before* normalization. Do not denormalize the
+    normalized tensor for visualization — clamping after denorm washes out colors.
+    """
+    from torchvision.transforms import functional as TF
+
+    out: list[torch.Tensor] = []
+    for i in range(int(image_bchw.shape[0])):
+        x = TF.resize(
+            image_bchw[i],
+            PREPROCESS.resize_size,
+            interpolation=PREPROCESS.interpolation,
+            antialias=True,
+        )
+        x = TF.center_crop(x, PREPROCESS.crop_size)
+        out.append(x.unsqueeze(0))
+    return torch.cat(out, dim=0)
+
+
+def alive_only_input_bchw(image_bchw: torch.Tensor, alive_b1hw: torch.Tensor | None = None) -> torch.Tensor:
+    """Full-resolution input with dead PREPROCESS pixels zeroed (alive footprint only)."""
+    if alive_b1hw is None:
+        alive_b1hw = compute_preprocess_alive_mask(image_bchw)
+    return image_bchw * alive_b1hw
+
+
 # ─── True-label helpers ───────────────────────────────────────────────────────
 
 def true_label_indices(model: torch.nn.Module, clean_bchw: torch.Tensor) -> torch.Tensor:
@@ -152,24 +220,51 @@ def _cw_per_sample(
     return cw, flipped
 
 
+def ssim_clean_stats(x_clean: torch.Tensor, kernel_size: int = 11) -> dict:
+    """Precompute the clean-image SSIM terms that don't depend on the adv image.
+
+    ``_ssim_per_image`` recomputes ``mu_x`` and ``sigma_x`` (2 of 5 pooling ops)
+    from the constant clean image on every call. When SSIM is evaluated many
+    times against the same clean image (the OPS search), precompute these once
+    and feed them to ``_ssim_per_image_cached``.
+    """
+    padding = kernel_size // 2
+    mu_x = F.avg_pool2d(x_clean, kernel_size, stride=1, padding=padding)
+    mu_x_sq = mu_x * mu_x
+    sigma_x = F.avg_pool2d(x_clean * x_clean, kernel_size, stride=1, padding=padding) - mu_x_sq
+    return {
+        "x_clean": x_clean,
+        "kernel_size": kernel_size,
+        "mu_x": mu_x,
+        "mu_x_sq": mu_x_sq,
+        "sigma_x": sigma_x,
+    }
+
+
+def _ssim_per_image_cached(stats: dict, x_adv: torch.Tensor) -> torch.Tensor:
+    """Per-image SSIM (B,) reusing precomputed clean stats from ``ssim_clean_stats``."""
+    kernel_size = stats["kernel_size"]
+    padding = kernel_size // 2
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    x_clean = stats["x_clean"]
+    mu_x = stats["mu_x"]
+    mu_y = F.avg_pool2d(x_adv, kernel_size, stride=1, padding=padding)
+    sigma_y = F.avg_pool2d(x_adv * x_adv, kernel_size, stride=1, padding=padding) - mu_y * mu_y
+    sigma_xy = F.avg_pool2d(x_clean * x_adv, kernel_size, stride=1, padding=padding) - mu_x * mu_y
+    numerator = (2.0 * mu_x * mu_y + c1) * (2.0 * sigma_xy + c2)
+    denominator = (stats["mu_x_sq"] + mu_y * mu_y + c1) * (stats["sigma_x"] + sigma_y + c2)
+    ssim_map = numerator / (denominator + 1e-12)
+    return ssim_map.mean(dim=[1, 2, 3])
+
+
 def _ssim_per_image(
     x_clean: torch.Tensor,
     x_adv: torch.Tensor,
     kernel_size: int = 11,
 ) -> torch.Tensor:
     """Differentiable per-image SSIM (B,) using the validator formula."""
-    padding = kernel_size // 2
-    c1 = 0.01 ** 2
-    c2 = 0.03 ** 2
-    mu_x = F.avg_pool2d(x_clean, kernel_size, stride=1, padding=padding)
-    mu_y = F.avg_pool2d(x_adv, kernel_size, stride=1, padding=padding)
-    sigma_x = F.avg_pool2d(x_clean * x_clean, kernel_size, stride=1, padding=padding) - mu_x * mu_x
-    sigma_y = F.avg_pool2d(x_adv * x_adv, kernel_size, stride=1, padding=padding) - mu_y * mu_y
-    sigma_xy = F.avg_pool2d(x_clean * x_adv, kernel_size, stride=1, padding=padding) - mu_x * mu_y
-    numerator = (2.0 * mu_x * mu_y + c1) * (2.0 * sigma_xy + c2)
-    denominator = (mu_x * mu_x + mu_y * mu_y + c1) * (sigma_x + sigma_y + c2)
-    ssim_map = numerator / (denominator + 1e-12)
-    return ssim_map.mean(dim=[1, 2, 3])
+    return _ssim_per_image_cached(ssim_clean_stats(x_clean, kernel_size), x_adv)
 
 
 def reward_aligned_loss(
@@ -182,7 +277,7 @@ def reward_aligned_loss(
     max_delta: float = MAX_LINF_DELTA,
     linf_component_weight: float = 0.7,
     rmse_component_weight: float = 0.3,
-    cw_confidence: float = 6.0,
+    cw_confidence: float = 2.0,
     floor_margin: float = 0.0005,
     linf_topk: int = 32,
     w_flip: float = 1.0,
@@ -192,6 +287,7 @@ def reward_aligned_loss(
     w_psnr: float = 0.05,
     min_ssim: float = MIN_SSIM,
     min_psnr_db: float = MIN_PSNR_DB,
+    flip_loss_override: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Loss that directly maximises the validator's perturbation_score.
@@ -207,9 +303,17 @@ def reward_aligned_loss(
     L-inf gradient uses a straight-through estimator: forward value is the true
     per-image max, gradient flows through the mean of the top-k abs deltas so
     many pixels are nudged instead of a single one.
+
+    `flip_loss_override` swaps the flip driver: when given, that scalar replaces
+    the margin-CW term (and `w_flip` is *not* re-applied — fold any weight into
+    it). The LTP feature-separation driver is passed here as a pre-weighted,
+    pre-negated distance so the optimiser still pushes adv away from clean
+    features. The flipped mask (used only to gate the size/quality terms) still
+    comes from the classifier logits.
     """
     cw, flipped = _cw_per_sample(logits, target_indices, cw_confidence)
-    flip_loss = cw.mean()
+    cw_mean = cw.mean()
+    flip_loss = cw_mean if flip_loss_override is None else flip_loss_override
 
     delta = adv_quant - clean_bchw
     abs_delta = delta.abs()
@@ -254,8 +358,9 @@ def reward_aligned_loss(
     ssim_loss = masked_mean(ssim_hinge)
     psnr_loss = masked_mean(psnr_hinge)
 
+    flip_term = flip_loss if flip_loss_override is not None else w_flip * flip_loss
     loss = (
-        w_flip * flip_loss
+        flip_term
         + w_score * score_loss
         + w_floor * floor_loss
         + w_ssim * ssim_loss
@@ -274,6 +379,190 @@ def reward_aligned_loss(
         "linf_mean": float(linf_hard.mean().item()),
     }
     return loss, components
+
+
+def mae_aligned_loss(
+    logits: torch.Tensor,
+    target_indices: torch.Tensor,
+    clean_bchw: torch.Tensor,
+    adv_quant: torch.Tensor,
+    *,
+    min_delta: float = MIN_LINF_DELTA,
+    max_delta: float = MAX_LINF_DELTA,
+    linf_component_weight: float = 0.7,
+    rmse_component_weight: float = 0.3,
+    cw_confidence: float = 6.0,
+    floor_margin: float = 0.0005,
+    w_flip: float = 1.0,
+    w_mae: float = 100.0,
+    w_floor: float = 80.0,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Margin-CW flip driver + MAE perturbation restriction (flip-gated).
+
+        loss = w_flip  * margin_CW
+             + w_mae   * MAE(|adv_quant - clean|)   [flipped images only]
+             + w_floor * floor_hinge(L-inf < floor) [flipped images only]
+
+    The 1/255 L-inf *upper* bound is enforced architecturally by the generator
+    (``tanh(h) * max_linf``), so there is no explicit L-inf ceiling term here.
+    The MAE term squeezes the whole perturbation toward zero; the floor hinge
+    keeps the per-image L-inf above the validator's MIN_LINF_DELTA so MAE can't
+    drive it into the too-small disqualification region.
+
+    Like ``reward_aligned_loss`` this is a flip-gated curriculum: the margin-CW
+    term is always active so every image learns to flip, while the size terms
+    (MAE, floor) apply only to images that currently flip (detached mask).
+
+    ``pert_score`` (the validator reward) is reconstructed for logging and
+    checkpoint selection only; it is not part of the optimised objective.
+    """
+    cw, flipped = _cw_per_sample(logits, target_indices, cw_confidence)
+    cw_mean = cw.mean()
+
+    delta = adv_quant - clean_bchw
+    abs_delta = delta.abs()
+    flat = abs_delta.flatten(1)
+
+    # Restriction term: per-image mean absolute perturbation.
+    mae = flat.mean(dim=1)
+
+    # Hard per-image L-inf for the floor hinge (no STE needed — gradient flows
+    # through the MAE term, which already touches every pixel).
+    linf_hard = flat.amax(dim=1)
+    floor_hinge = torch.clamp(float(min_delta) + float(floor_margin) - linf_hard, min=0.0)
+
+    # Validator reward reconstruction (monitoring / checkpoint proxy only).
+    rmse = torch.sqrt(delta.pow(2).flatten(1).mean(dim=1) + 1e-12)
+    denom = max(1e-12, float(max_delta) - float(min_delta))
+    linf_ratio = ((linf_hard - float(min_delta)) / denom).clamp(0.0, 1.0)
+    rmse_ratio = (rmse / float(max_delta)).clamp(0.0, 1.0)
+    total_w = max(1e-12, float(linf_component_weight) + float(rmse_component_weight))
+    pert_score = (
+        float(linf_component_weight) * (1.0 - linf_ratio) ** 2
+        + float(rmse_component_weight) * (1.0 - rmse_ratio) ** 2
+    ) / total_w
+
+    mask = flipped.detach()
+    mask_denom = mask.sum().clamp(min=1.0)
+
+    def masked_mean(term: torch.Tensor) -> torch.Tensor:
+        return (term * mask).sum() / mask_denom
+
+    mae_loss = masked_mean(mae)
+    floor_loss = masked_mean(floor_hinge)
+
+    loss = w_flip * cw_mean + w_mae * mae_loss + w_floor * floor_loss
+
+    components = {
+        "loss": float(loss.item()),
+        "flip": float(cw_mean.item()),
+        "mae": float(mae_loss.item()),
+        "floor": float(floor_loss.item()),
+        "flip_rate": float(mask.mean().item()),
+        "pert_score": float(masked_mean(pert_score).item()),
+        "linf_mean": float(linf_hard.mean().item()),
+    }
+    return loss, components
+
+
+# ─── LTP mid-level feature separation ─────────────────────────────────────────
+#
+# Learning Transferable Adversarial Perturbations (Nakka & Salzmann, NeurIPS'21)
+# drives the attack by *maximising* the distance between the clean and adversarial
+# mid-level feature maps of a frozen classifier (a label-free, smooth flip
+# signal). EfficientNetV2-L exposes its blocks as `model.features` (a Sequential
+# of 9 stages, indices 0..8); we tap one or more of them (mid-level ~3-5).
+
+
+def efficientnet_num_feature_blocks(model: torch.nn.Module) -> int:
+    """Number of `model.features` stages (9 for EfficientNetV2-L)."""
+    core = getattr(model, "_orig_mod", model)
+    return len(core.features) if hasattr(core, "features") else 0
+
+
+def _features_and_logits(
+    model: torch.nn.Module,
+    model_in: torch.Tensor,
+    feat_layers: tuple[int, ...],
+    grad_checkpoint: bool = False,
+) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+    """Single pass that returns logits AND the requested intermediate maps.
+
+    Walks `model.features` block by block, collecting outputs at `feat_layers`,
+    then finishes avgpool -> flatten -> classifier for the logits.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    core = getattr(model, "_orig_mod", model)
+    if not hasattr(core, "features"):
+        return model(model_in), {}
+
+    wanted = set(int(i) for i in feat_layers)
+    feats: dict[int, torch.Tensor] = {}
+    use_ckpt = grad_checkpoint and torch.is_grad_enabled()
+
+    out = model_in
+    for i, block in enumerate(core.features):
+        out = checkpoint(block, out, use_reentrant=False) if use_ckpt else block(out)
+        if i in wanted:
+            feats[i] = out
+
+    pooled = torch.flatten(core.avgpool(out), 1)
+    logits = core.classifier(pooled)
+    return logits, feats
+
+
+@torch.no_grad()
+def clean_feature_maps(
+    model: torch.nn.Module,
+    clean_bchw: torch.Tensor,
+    feat_layers: tuple[int, ...],
+) -> dict[int, torch.Tensor]:
+    """Detached clean mid-level features (validator preprocess), stop-early."""
+    core = getattr(model, "_orig_mod", model)
+    x = apply_validator_preprocess(clean_bchw)
+    if not hasattr(core, "features"):
+        return {}
+    wanted = set(int(i) for i in feat_layers)
+    last = max(wanted) if wanted else -1
+    feats: dict[int, torch.Tensor] = {}
+    for i, block in enumerate(core.features):
+        x = block(x)
+        if i in wanted:
+            feats[i] = x.detach()
+        if i >= last:
+            break
+    return feats
+
+
+def feat_separation_loss(
+    feats_adv: dict[int, torch.Tensor],
+    feats_clean: dict[int, torch.Tensor],
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Summed feature distance to MAXIMISE (LTP `feat_loss_mutliscale_fn`).
+
+    Per layer: MSE(adv, clean). With `normalize`, divide by the clean feature
+    energy so each tapped layer contributes on a comparable ~O(1) scale,
+    regardless of its activation magnitude (makes `w_feat` tuning stable).
+    Returns a positive distance; the trainer negates it for the flip driver.
+    """
+    total: torch.Tensor | None = None
+    for k in feats_adv:
+        a = feats_adv[k]
+        c = feats_clean[k]
+        d = (a - c).pow(2).mean()
+        if normalize:
+            d = d / (c.pow(2).mean() + 1e-8)
+        total = d if total is None else total + d
+    if total is None:
+        # No features tapped — return a graph-connected zero.
+        any_feat = next(iter(feats_adv.values()), None)
+        if any_feat is not None:
+            return any_feat.sum() * 0.0
+        return torch.zeros((), device=feats_clean[next(iter(feats_clean))].device) \
+            if feats_clean else torch.zeros(())
+    return total
 
 
 # ─── Full forward pass ────────────────────────────────────────────────────────
@@ -326,6 +615,30 @@ def forward_adv(
     else:
         logits = model(model_in)
     return logits, adv_quant
+
+
+def forward_adv_with_feats(
+    model: torch.nn.Module,
+    generator: torch.nn.Module,
+    clean_bchw: torch.Tensor,
+    feat_layers: tuple[int, ...],
+    channels_last: bool = False,
+    grad_checkpoint: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, dict[int, torch.Tensor]]:
+    """Like :func:`forward_adv` but also returns adversarial mid-level features.
+
+    Used by the LTP feature-separation flip driver. Logits and features come
+    from a single classifier pass over the (STE-quantised, preprocessed) adv
+    image, so the extra signal costs no additional forward.
+    """
+    perturbation = generator(clean_bchw)
+    adv = torch.clamp(clean_bchw + perturbation, 0.0, 1.0)
+    adv_quant = quantize_ste(adv)
+    model_in = apply_validator_preprocess(adv_quant)
+    if channels_last:
+        model_in = model_in.contiguous(memory_format=torch.channels_last)
+    logits, feats = _features_and_logits(model, model_in, feat_layers, grad_checkpoint)
+    return logits, adv_quant, feats
 
 
 # ─── Validator-grade evaluation (no grad) ─────────────────────────────────────

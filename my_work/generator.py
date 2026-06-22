@@ -63,7 +63,7 @@ class Up(nn.Module):
         self.res = ResBlock(c_out)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+        x = F.interpolate(x, size=skip.shape[-2:], mode="bicubic")
         x = torch.cat([x, skip], dim=1)
         return self.res(self.act(self.norm(self.fuse(x))))
 
@@ -131,6 +131,144 @@ class Generator(nn.Module):
         return self.tanh(self.head(d1)) * self.max_linf
 
 
+# ─── LTP ResNet generator (Nakka & Salzmann, NeurIPS 2021) ─────────────────────
+
+
+class _LTPResidualBlock(nn.Module):
+    """ResNet block from Transferable_Perturbations/pix2pix/models/resnet_gen.py."""
+
+    def __init__(self, num_filters: int, gen_dropout: float) -> None:
+        super().__init__()
+        layers = [
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(num_filters, num_filters, kernel_size=3, bias=False),
+            nn.BatchNorm2d(num_filters),
+            nn.ReLU(True),
+        ]
+        if gen_dropout > 0.0:
+            layers.append(nn.Dropout(gen_dropout))
+        layers += [
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(num_filters, num_filters, kernel_size=3, bias=False),
+            nn.BatchNorm2d(num_filters),
+        ]
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.block(x)
+
+
+class GeneratorResnet(nn.Module):
+    """LTP perturbation generator (faithful port of ``GeneratorResnet``).
+
+    Architecture matches the paper's release: ReflectionPad + 7x7 stem, two
+    strided downsamples, ``2`` (low) or ``6`` (high) residual blocks, two
+    transposed-conv upsamples, and a 7x7 head.
+
+    Two adaptations make it drop into this subnet pipeline:
+      * The head emits a *bounded perturbation* ``tanh(x) * max_linf`` (the
+        paper emitted a full image in ``[0, 1]`` then projected to an eps-ball).
+        This matches :class:`Generator` so ``forward_adv`` is unchanged.
+      * The output is resized back to the input resolution, so the net works on
+        the arbitrary native sizes this pipeline uses (the paper assumed fixed
+        224/299 inputs). Bilinear resampling of values in ``[-m, m]`` stays in
+        ``[-m, m]``, so the L-inf bound is preserved.
+
+    The head conv is zero-initialised (perturbation ~0 at start) for a stable
+    minimum-norm optimisation start, consistent with :class:`Generator`.
+    """
+
+    def __init__(
+        self,
+        max_linf: float = 0.03,
+        base: int = 64,
+        *,
+        gen_dropout: float = 0.0,
+        data_dim: str = "high",
+    ) -> None:
+        super().__init__()
+        self.max_linf = float(max_linf)
+        ngf = int(base)
+        self.data_dim = str(data_dim)
+
+        self.block1 = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(3, ngf, kernel_size=7, padding=0, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+        )
+        self.block2 = nn.Sequential(
+            nn.Conv2d(ngf, ngf * 2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+        )
+        self.block3 = nn.Sequential(
+            nn.Conv2d(ngf * 2, ngf * 4, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 4),
+            nn.ReLU(True),
+        )
+
+        n_res = 6 if self.data_dim == "high" else 2
+        self.resblocks = nn.Sequential(
+            *[_LTPResidualBlock(ngf * 4, gen_dropout) for _ in range(n_res)]
+        )
+
+        self.upsampl1 = nn.Sequential(
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, kernel_size=3, stride=2,
+                               padding=1, output_padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+        )
+        self.upsampl2 = nn.Sequential(
+            nn.ConvTranspose2d(ngf * 2, ngf, kernel_size=3, stride=2,
+                               padding=1, output_padding=1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+        )
+        self.blockf = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(ngf, 3, kernel_size=7, padding=0),
+        )
+
+        nn.init.zeros_(self.blockf[1].weight)
+        if self.blockf[1].bias is not None:
+            nn.init.zeros_(self.blockf[1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.block1(x)
+        h = self.block2(h)
+        h = self.block3(h)
+        h = self.resblocks(h)
+        h = self.upsampl1(h)
+        h = self.upsampl2(h)
+        h = self.blockf(h)
+
+        pert = torch.tanh(h) * self.max_linf
+        if pert.shape[-2:] != x.shape[-2:]:
+            pert = F.interpolate(pert, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        return pert
+
+
+def build_generator(
+    arch: str = "unet",
+    *,
+    max_linf: float = 0.03,
+    base: int = 48,
+    gen_dropout: float = 0.0,
+) -> nn.Module:
+    """Factory for the selectable generator architectures.
+
+    ``unet``   -> :class:`Generator` (default; resolution-agnostic U-Net).
+    ``resnet`` -> :class:`GeneratorResnet` (LTP port).
+    """
+    arch = str(arch).lower()
+    if arch == "unet":
+        return Generator(max_linf=max_linf, base=base)
+    if arch == "resnet":
+        return GeneratorResnet(max_linf=max_linf, base=base, gen_dropout=gen_dropout)
+    raise ValueError(f"unknown gen-arch: {arch!r} (expected 'unet' or 'resnet')")
+
+
 def load_generator_checkpoint(
     generator: Generator,
     path: Path | str,
@@ -150,7 +288,11 @@ def load_generator_checkpoint(
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if isinstance(payload, dict) and "generator_state" in payload:
         state = payload["generator_state"]
-        meta = {k: payload[k] for k in ("epoch", "max_linf", "val") if k in payload}
+        meta = {
+            k: payload[k]
+            for k in ("epoch", "max_linf", "val", "gen_arch", "train_score")
+            if k in payload
+        }
     elif isinstance(payload, dict):
         state = payload
         meta = {}

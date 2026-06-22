@@ -42,6 +42,14 @@ from ops_attack import (  # noqa: E402
     build_ops_attack,
     build_ops_budget_attack,
     forwards_per_image,
+    budget_config_aitl,
+    budget_config_l2t,
+    budget_config_smooth,
+    budget_config_aitl_restarts,
+    budget_config_smooth_aitl,
+    budget_config_dual,
+    budget_config_dual_ensemble,
+    budget_config_adam,
 )
 from paths import (  # noqa: E402
     IMAGENET100_LABELS_CACHE,
@@ -82,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     # OPS hyperparameters
     p.add_argument("--attack-epsilon", type=float, default=QUANT_SAFE_MAX_LINF,
                    help="OPS L-inf budget (default 7/255, the quant-safe scoring cap)")
-    p.add_argument("--num-iter", type=int, default=10, help="[ce] OPS iterations")
+    p.add_argument("--num-iter", type=int, default=2, help="[ce] OPS iterations")
     p.add_argument("--num-sample-neighbor", type=int, default=0,
                    help="OPS neighbor samples (0 = off; off is strongest white-box overfit)")
     p.add_argument("--num-sample-operator", type=int, default=0,
@@ -91,17 +99,52 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--decay", type=float, default=1.0)
     p.add_argument("--random-start", action="store_true")
     # budget objective (only used when --objective budget)
-    p.add_argument("--max-level", type=int, default=7, help="Max L-inf level in 1/255 units (<=7)")
-    p.add_argument("--inner-iters", type=int, default=60, help="PGD steps per L-inf level")
+    p.add_argument("--max-level", type=int, default=1, help="Max L-inf level in 1/255 units (<=7)")
+    p.add_argument("--inner-iters", type=int, default=120, help="PGD steps per L-inf level")
     p.add_argument("--restarts", type=int, default=2, help="PGD restarts per level (>1 adds random init)")
-    p.add_argument("--first-level-restarts", type=int, default=8, help="Extra PGD restarts at level 1 (1/255 floor)")
+    p.add_argument("--first-level-restarts", type=int, default=2, help="Extra PGD restarts at level 1 (1/255 floor)")
     p.add_argument("--alpha-frac", type=float, default=0.5, help="PGD step size as fraction of eps")
     p.add_argument("--no-sparse", action="store_true", help="Disable L0 sparse refinement")
-    p.add_argument("--sparse-steps", type=int, default=50, help="PGD steps per support size in k binary search")
+    p.add_argument("--sparse-steps", type=int, default=15, help="PGD steps per support size in k binary search")
     p.add_argument("--sparse-restarts", type=int, default=2, help="Restarts of support-restricted PGD (>1 random reseed)")
     p.add_argument("--polish-rounds", type=int, default=3, help="Backward-elimination passes after the k search (0 disables)")
+    p.add_argument("--no-crop-mask", action="store_true", help="Allow perturbations outside PREPROCESS alive footprint")
     p.add_argument("--flip-margin", type=float, default=2.0, help="Logit margin required when pruning (conservative)")
     p.add_argument("--accept-margin", type=float, default=1.0, help="Logit margin to accept an L-inf level (lower => more 1/255)")
+    # ascent loss function
+    p.add_argument("--loss-type", choices=["cw", "dlr"], default="cw",
+                   help="PGD ascent objective: 'cw' = C&W logit margin (default) | 'dlr' = Difference-of-Logits-Ratio")
+    p.add_argument("--loss-target-margin", type=float, default=None,
+                   help="[cw] Cap each row's margin at this kappa so PGD stops pushing once flipped past it (None=off)")
+    # gradient diversity (AITL / L2T)
+    p.add_argument("--grad-diversity", type=int, default=0,
+                   help="Average CW gradient over N augmented copies per step (0=off)")
+    p.add_argument("--grad-transform-src", choices=["aitl", "l2t"], default="aitl",
+                   help="Transform pool for gradient diversity: 'aitl' (20 ops) or 'l2t' (~98 ops)")
+    p.add_argument("--aitl-chain-len", type=int, default=4,
+                   help="Number of AITL ops per random chain (default 4)")
+    p.add_argument("--l2t-n-ops", type=int, default=2,
+                   help="Number of L2T ops per sampled chain (default 2)")
+    p.add_argument("--l2t-lr", type=float, default=0.01,
+                   help="L2T aug_param learning rate (default 0.01)")
+    # white-box adaptations
+    p.add_argument("--grad-smooth-dct", action="store_true",
+                   help="Low-pass filter gradient in DCT domain before momentum (reduces RMSE)")
+    p.add_argument("--grad-smooth-frac", type=float, default=0.5,
+                   help="Fraction of DCT frequency bins to keep (default 0.5)")
+    p.add_argument("--aitl-restarts", action="store_true",
+                   help="Seed PGD restarts r>0 with AITL-guided gradient direction")
+    # DualMIFGSM / Ens-FGSM-MIFGSM tricks
+    p.add_argument("--dual-example", action="store_true",
+                   help="Compute each step's gradient at a fresh random delta (DualMIFGSM trick)")
+    p.add_argument("--dual-ensemble", type=int, default=1,
+                   help="Number of random deltas to average per step (1=Dual, N=Ensemble; default 1)")
+    # Sign-of-Adam
+    p.add_argument("--adam", action="store_true",
+                   help="Replace MI-FGSM momentum with sign(Adam direction) [AMI-FGSM style]")
+    p.add_argument("--adam-beta1", type=float, default=0.9)
+    p.add_argument("--adam-beta2", type=float, default=0.999)
+    p.add_argument("--adam-eps", type=float, default=1e-8)
     p.add_argument("--device", type=str, default=None, help="cuda / cpu (auto by default)")
     return p.parse_args()
 
@@ -182,7 +225,21 @@ def main() -> int:
         print(f"inner_iters/restarts: {args.inner_iters} / {args.restarts} (level-1 restarts={args.first_level_restarts})")
         print(f"sparse              : {not args.no_sparse} (steps={args.sparse_steps}, restarts={args.sparse_restarts}, prune_margin={args.flip_margin})")
         print(f"polish_rounds       : {args.polish_rounds} (backward elimination)")
+        print(f"crop_mask           : {not args.no_crop_mask} (zero delta outside PREPROCESS footprint)")
         print(f"accept_margin       : {args.accept_margin} (lower => more images at 1/255)")
+        _kappa = "off" if args.loss_target_margin is None else args.loss_target_margin
+        print(f"loss_type           : {args.loss_type} (cw target_margin={_kappa})")
+        if args.grad_diversity > 0:
+            print(f"grad_diversity      : {args.grad_diversity} (src={args.grad_transform_src})")
+        if args.grad_smooth_dct:
+            print(f"grad_smooth_dct     : True (keep_frac={args.grad_smooth_frac})")
+        if args.aitl_restarts:
+            print(f"aitl_restarts       : True (chain_len={args.aitl_chain_len})")
+        if args.dual_example:
+            label = "DualMIFGSM" if args.dual_ensemble <= 1 else f"Ens-FGSM-MIFGSM (N={args.dual_ensemble})"
+            print(f"dual_example        : True  [{label}]")
+        if args.adam:
+            print(f"sign_of_adam        : True  (beta1={args.adam_beta1} beta2={args.adam_beta2} eps={args.adam_eps})")
     else:
         print(f"attack_epsilon      : {args.attack_epsilon}")
         print(f"num_iter            : {args.num_iter}")
@@ -205,6 +262,23 @@ def main() -> int:
             polish_rounds=args.polish_rounds,
             flip_margin=args.flip_margin,
             accept_margin=args.accept_margin,
+            crop_mask=not args.no_crop_mask,
+            loss_type=args.loss_type,
+            loss_target_margin=args.loss_target_margin,
+            grad_diversity=args.grad_diversity,
+            grad_transform_src=args.grad_transform_src,
+            aitl_chain_len=args.aitl_chain_len,
+            l2t_n_ops=args.l2t_n_ops,
+            l2t_lr=args.l2t_lr,
+            grad_smooth_dct=args.grad_smooth_dct,
+            grad_smooth_frac=args.grad_smooth_frac,
+            aitl_restarts=args.aitl_restarts,
+            dual_example=args.dual_example,
+            dual_ensemble=args.dual_ensemble,
+            use_adam=args.adam,
+            adam_beta1=args.adam_beta1,
+            adam_beta2=args.adam_beta2,
+            adam_eps=args.adam_eps,
         )
         attack = build_ops_budget_attack(
             device,

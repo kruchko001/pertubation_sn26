@@ -10,9 +10,13 @@ from tqdm import tqdm
 
 from generator import Generator
 from model_utils import (
+    clean_feature_maps,
     cw_loss,
     eval_batch,
+    feat_separation_loss,
     forward_adv,
+    forward_adv_with_feats,
+    mae_aligned_loss,
     psnr_loss_differentiable,
     reward_aligned_loss,
     ssim_loss_differentiable,
@@ -31,11 +35,18 @@ def train_one_epoch(
     desc: str = "train",
 ) -> dict[str, float]:
     generator.train()
-    if args.loss == "reward":
+    if args.loss in ("reward", "feat"):
         totals: dict[str, float] = {
             "loss": 0.0, "flip": 0.0, "score": 0.0, "floor": 0.0,
             "ssim_h": 0.0, "psnr_h": 0.0, "flip_rate": 0.0,
             "pert_score": 0.0, "linf_mean": 0.0,
+        }
+        if args.loss == "feat":
+            totals["feat_dist"] = 0.0
+    elif args.loss == "mae":
+        totals = {
+            "loss": 0.0, "flip": 0.0, "mae": 0.0, "floor": 0.0,
+            "flip_rate": 0.0, "pert_score": 0.0, "linf_mean": 0.0,
         }
     else:
         totals = {"loss": 0.0, "cw": 0.0, "ssim": 0.0, "psnr": 0.0}
@@ -44,6 +55,8 @@ def train_one_epoch(
     channels_last = (not args.no_channels_last) and device.type == "cuda"
     grad_checkpoint = bool(getattr(args, "grad_checkpoint", False))
     checkpoint_segments = int(getattr(args, "checkpoint_segments", 4))
+    feat_layers = tuple(getattr(args, "feat_layers", (4,)))
+    feat_normalize = bool(getattr(args, "feat_normalize", True))
 
     pbar = tqdm(loader, desc=desc, dynamic_ncols=True, leave=True)
     for step, (clean, labels) in enumerate(pbar, start=1):
@@ -55,14 +68,31 @@ def train_one_epoch(
             labels = torch.where(labels < 0, computed, labels)
         target_idx = labels
 
-        logits, adv_quant = forward_adv(
-            classifier, generator, clean,
-            channels_last=channels_last,
-            grad_checkpoint=grad_checkpoint,
-            checkpoint_segments=checkpoint_segments,
-        )
+        if args.loss == "feat":
+            feats_clean = clean_feature_maps(classifier, clean, feat_layers)
+            logits, adv_quant, feats_adv = forward_adv_with_feats(
+                classifier, generator, clean, feat_layers,
+                channels_last=channels_last,
+                grad_checkpoint=grad_checkpoint,
+            )
+        else:
+            logits, adv_quant = forward_adv(
+                classifier, generator, clean,
+                channels_last=channels_last,
+                grad_checkpoint=grad_checkpoint,
+                checkpoint_segments=checkpoint_segments,
+            )
 
-        if args.loss == "reward":
+        if args.loss in ("reward", "feat"):
+            flip_override = None
+            feat_dist_val = 0.0
+            if args.loss == "feat":
+                # Flip driver = maximise clean<->adv feature distance (negate to
+                # minimise). w_feat folds the weight in; reward_aligned_loss then
+                # leaves w_flip unapplied for the override term.
+                feat_dist = feat_separation_loss(feats_adv, feats_clean, normalize=feat_normalize)
+                flip_override = -args.w_feat * feat_dist
+                feat_dist_val = float(feat_dist.item())
             loss, comps = reward_aligned_loss(
                 logits=logits,
                 target_indices=target_idx,
@@ -76,6 +106,21 @@ def train_one_epoch(
                 w_floor=args.w_floor,
                 w_ssim=args.w_ssim,
                 w_psnr=args.w_psnr,
+                flip_loss_override=flip_override,
+            )
+            if args.loss == "feat":
+                comps["feat_dist"] = feat_dist_val
+        elif args.loss == "mae":
+            loss, comps = mae_aligned_loss(
+                logits=logits,
+                target_indices=target_idx,
+                clean_bchw=clean,
+                adv_quant=adv_quant,
+                cw_confidence=args.cw_confidence,
+                floor_margin=args.floor_margin,
+                w_flip=args.w_flip,
+                w_mae=args.w_mae,
+                w_floor=args.w_floor,
             )
         else:
             loss_cw = cw_loss(logits, target_idx)
@@ -96,15 +141,28 @@ def train_one_epoch(
         steps += 1
 
         if log_every > 0 and step % log_every == 0:
-            if args.loss == "reward":
+            if args.loss in ("reward", "feat"):
+                postfix = {
+                    "loss": f"{comps['loss']:.3f}",
+                    "flip": f"{comps['flip']:.3f}",
+                    "score": f"{comps['score']:.3f}",
+                    "floor": f"{comps['floor']:.3f}",
+                    "ssim_h": f"{comps['ssim_h']:.3f}",
+                    "psnr_h": f"{comps['psnr_h']:.3f}",
+                    "fr": f"{comps['flip_rate']:.3f}",
+                    "ps": f"{comps['pert_score']:.3f}",
+                    "linf": f"{comps['linf_mean']:.5f}",
+                }
+                if args.loss == "feat":
+                    postfix["fdist"] = f"{comps['feat_dist']:.3f}"
+                pbar.set_postfix(postfix, refresh=False)
+            elif args.loss == "mae":
                 pbar.set_postfix(
                     {
                         "loss": f"{comps['loss']:.3f}",
                         "flip": f"{comps['flip']:.3f}",
-                        "score": f"{comps['score']:.3f}",
+                        "mae": f"{comps['mae']:.5f}",
                         "floor": f"{comps['floor']:.3f}",
-                        "ssim_h": f"{comps['ssim_h']:.3f}",
-                        "psnr_h": f"{comps['psnr_h']:.3f}",
                         "fr": f"{comps['flip_rate']:.3f}",
                         "ps": f"{comps['pert_score']:.3f}",
                         "linf": f"{comps['linf_mean']:.5f}",

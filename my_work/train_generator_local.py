@@ -42,6 +42,7 @@ Usage (from my_work/):
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import sys
 from pathlib import Path
@@ -82,12 +83,32 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-schedule", choices=["cosine", "none"], default="cosine",
+                        help="LR schedule: cosine (default)=linear warmup then cosine "
+                             "decay to --min-lr over all steps; none=constant lr.")
+    parser.add_argument("--warmup-steps", type=int, default=200,
+                        help="Linear LR warmup steps (0..--lr) before cosine decay. "
+                             "Smooths the early, high-variance steps so the generator "
+                             "isn't kicked around before it stabilises.")
+    parser.add_argument("--min-lr", type=float, default=1e-6,
+                        help="Cosine decay floor (final lr at the end of training).")
     parser.add_argument("--loss", choices=["reward", "legacy", "feat", "mae"], default="reward",
                         help="reward=margin-CW flip driver; feat=LTP mid-level "
                              "feature-separation flip driver (keeps reward L-inf/SSIM/PSNR "
                              "terms); mae=margin-CW flip driver + MAE perturbation restriction "
                              "+ min-L-inf floor (L-inf<=1/255 enforced by the generator); "
                              "legacy=plain CW+SSIM+PSNR")
+    parser.add_argument("--flip-loss", choices=["cw", "dlr"], default="dlr",
+                        help="Flip driver for reward/feat/mae/legacy losses. "
+                             "dlr (default)=Difference-of-Logits-Ratio: normalises the "
+                             "logit margin by the logit spread, so it is invariant to "
+                             "per-image logit scale and a single confident image can't "
+                             "blow up the batch loss (stable training). cw=raw-logit "
+                             "margin (legacy; unbounded scale).")
+    parser.add_argument("--dlr-confidence", type=float, default=0.1,
+                        help="With --flip-loss dlr: hinge margin on the NORMALISED DLR "
+                             "scale (~O(1)), not raw logits. The flip term switches off "
+                             "once an image is flipped by this margin.")
     parser.add_argument("--ssim-weight", type=float, default=10.0)
     parser.add_argument("--psnr-weight", type=float, default=5.0)
     parser.add_argument("--cw-confidence", type=float, default=6.0)
@@ -378,6 +399,31 @@ def main() -> int:
 
     optimizer = torch.optim.Adam(generator.parameters(), lr=args.lr)
 
+    scheduler = None
+    if args.lr_schedule == "cosine":
+        steps_per_epoch = max(1, len(train_loader))
+        total_steps = max(1, steps_per_epoch * args.epochs)
+        warmup_steps = max(0, min(int(args.warmup_steps), total_steps - 1))
+        min_factor = (args.min_lr / args.lr) if args.lr > 0 else 0.0
+
+        def lr_lambda(step: int) -> float:
+            # step is 0-based count of completed optimizer.step() calls.
+            if warmup_steps > 0 and step < warmup_steps:
+                return float(step + 1) / float(warmup_steps)
+            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+            progress = min(1.0, max(0.0, progress))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return min_factor + (1.0 - min_factor) * cosine
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        print(f"lr schedule         : cosine (warmup={warmup_steps} steps, "
+              f"total={total_steps} steps, min_lr={args.min_lr:g})")
+    else:
+        print(f"lr schedule         : constant (lr={args.lr:g})")
+    print(f"flip loss           : {args.flip_loss}"
+          + (f" (dlr_confidence={args.dlr_confidence:g})" if args.flip_loss == "dlr"
+             else f" (cw_confidence={args.cw_confidence:g})"))
+
     args.save.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
@@ -391,6 +437,7 @@ def main() -> int:
             args=args,
             log_every=args.log_every,
             desc=f"epoch {epoch}/{args.epochs}",
+            scheduler=scheduler,
         )
         print_train_summary(args, train_stats)
 

@@ -159,6 +159,15 @@ def cw_loss(logits: torch.Tensor, target_indices: torch.Tensor, confidence: floa
     return torch.clamp(target_logits - other_logits + confidence, min=0.0).mean()
 
 
+def dlr_loss(logits: torch.Tensor, target_indices: torch.Tensor, confidence: float = 0.0) -> torch.Tensor:
+    """Untargeted Difference-of-Logits-Ratio loss — minimise to flip.
+
+    Scale-invariant alternative to :func:`cw_loss`: see :func:`_dlr_per_sample`.
+    """
+    dlr, _ = _dlr_per_sample(logits, target_indices, confidence)
+    return dlr.mean()
+
+
 def ssim_loss_differentiable(
     x_clean: torch.Tensor,
     x_adv: torch.Tensor,
@@ -218,6 +227,55 @@ def _cw_per_sample(
     cw = torch.clamp(target_logits - other_logits + confidence, min=0.0)
     flipped = (other_logits > target_logits).float()
     return cw, flipped
+
+
+def _dlr_per_sample(
+    logits: torch.Tensor,
+    target_indices: torch.Tensor,
+    confidence: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Difference-of-Logits-Ratio flip driver (Croce & Hein, AutoAttack).
+
+    Returns ``(dlr_hinge_per_sample, flipped_mask)``. Unlike the raw-logit margin
+    (``_cw_per_sample``), DLR normalises the (true - best-other) logit gap by the
+    logit *spread* ``z_pi1 - z_pi3`` (1st minus 3rd largest logit). This makes the
+    driver invariant to per-image logit scale/shift, so a single confidently
+    classified image can no longer dominate the batch — the term stays on a
+    stable ~O(1) range, which is what keeps the loss from swinging drastically.
+
+        dlr = (z_true - max_{i != true} z_i) / (z_pi1 - z_pi3)
+
+    ``dlr`` is > 0 while the true class wins and < 0 once flipped. We hinge it at
+    zero with ``confidence`` (in normalised DLR units, not logits) so the term
+    switches off once an image is flipped by that margin, matching the
+    flip-gated curriculum used for the CW driver.
+    """
+    idx = target_indices.view(-1, 1)
+    target_logits = logits.gather(1, idx).squeeze(1)
+    mask = torch.ones_like(logits, dtype=torch.bool)
+    mask.scatter_(1, idx, False)
+    other_logits = logits.masked_fill(~mask, float("-inf")).max(dim=1).values
+
+    # Spread normaliser: difference between the 1st and 3rd largest logits.
+    sorted_logits, _ = logits.sort(dim=1, descending=True)
+    spread = (sorted_logits[:, 0] - sorted_logits[:, 2]).clamp_min(1e-12)
+
+    dlr = (target_logits - other_logits) / spread
+    dlr_hinge = torch.clamp(dlr + confidence, min=0.0)
+    flipped = (other_logits > target_logits).float()
+    return dlr_hinge, flipped
+
+
+def _flip_per_sample(
+    logits: torch.Tensor,
+    target_indices: torch.Tensor,
+    confidence: float,
+    flip_loss: str = "cw",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch the per-sample flip driver: ``"dlr"`` (scale-invariant) or ``"cw"``."""
+    if flip_loss == "dlr":
+        return _dlr_per_sample(logits, target_indices, confidence)
+    return _cw_per_sample(logits, target_indices, confidence)
 
 
 def ssim_clean_stats(x_clean: torch.Tensor, kernel_size: int = 11) -> dict:
@@ -287,6 +345,7 @@ def reward_aligned_loss(
     w_psnr: float = 0.05,
     min_ssim: float = MIN_SSIM,
     min_psnr_db: float = MIN_PSNR_DB,
+    flip_loss: str = "cw",
     flip_loss_override: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
@@ -311,9 +370,9 @@ def reward_aligned_loss(
     features. The flipped mask (used only to gate the size/quality terms) still
     comes from the classifier logits.
     """
-    cw, flipped = _cw_per_sample(logits, target_indices, cw_confidence)
+    cw, flipped = _flip_per_sample(logits, target_indices, cw_confidence, flip_loss)
     cw_mean = cw.mean()
-    flip_loss = cw_mean if flip_loss_override is None else flip_loss_override
+    flip_term_value = cw_mean if flip_loss_override is None else flip_loss_override
 
     delta = adv_quant - clean_bchw
     abs_delta = delta.abs()
@@ -358,7 +417,7 @@ def reward_aligned_loss(
     ssim_loss = masked_mean(ssim_hinge)
     psnr_loss = masked_mean(psnr_hinge)
 
-    flip_term = flip_loss if flip_loss_override is not None else w_flip * flip_loss
+    flip_term = flip_term_value if flip_loss_override is not None else w_flip * flip_term_value
     loss = (
         flip_term
         + w_score * score_loss
@@ -369,7 +428,7 @@ def reward_aligned_loss(
 
     components = {
         "loss": float(loss.item()),
-        "flip": float(flip_loss.item()),
+        "flip": float(flip_term_value.item()),
         "score": float(score_loss.item()),
         "floor": float(floor_loss.item()),
         "ssim_h": float(ssim_loss.item()),
@@ -396,6 +455,7 @@ def mae_aligned_loss(
     w_flip: float = 1.0,
     w_mae: float = 100.0,
     w_floor: float = 80.0,
+    flip_loss: str = "cw",
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Margin-CW flip driver + MAE perturbation restriction (flip-gated).
 
@@ -416,7 +476,7 @@ def mae_aligned_loss(
     ``pert_score`` (the validator reward) is reconstructed for logging and
     checkpoint selection only; it is not part of the optimised objective.
     """
-    cw, flipped = _cw_per_sample(logits, target_indices, cw_confidence)
+    cw, flipped = _flip_per_sample(logits, target_indices, cw_confidence, flip_loss)
     cw_mean = cw.mean()
 
     delta = adv_quant - clean_bchw

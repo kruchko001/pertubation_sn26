@@ -12,6 +12,7 @@ from generator import Generator
 from model_utils import (
     clean_feature_maps,
     cw_loss,
+    dlr_loss,
     eval_batch,
     feat_separation_loss,
     forward_adv,
@@ -33,6 +34,7 @@ def train_one_epoch(
     args: argparse.Namespace,
     log_every: int,
     desc: str = "train",
+    scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
 ) -> dict[str, float]:
     generator.train()
     if args.loss in ("reward", "feat"):
@@ -57,6 +59,15 @@ def train_one_epoch(
     checkpoint_segments = int(getattr(args, "checkpoint_segments", 4))
     feat_layers = tuple(getattr(args, "feat_layers", (4,)))
     feat_normalize = bool(getattr(args, "feat_normalize", True))
+
+    # Flip driver selection. DLR is scale-invariant, so its hinge confidence is
+    # on the normalised DLR scale (~O(1)), not the raw-logit scale used by CW.
+    flip_loss = str(getattr(args, "flip_loss", "cw"))
+    flip_confidence = (
+        float(getattr(args, "dlr_confidence", 0.1))
+        if flip_loss == "dlr"
+        else float(getattr(args, "cw_confidence", 6.0))
+    )
 
     pbar = tqdm(loader, desc=desc, dynamic_ncols=True, leave=True)
     for step, (clean, labels) in enumerate(pbar, start=1):
@@ -98,7 +109,7 @@ def train_one_epoch(
                 target_indices=target_idx,
                 clean_bchw=clean,
                 adv_quant=adv_quant,
-                cw_confidence=args.cw_confidence,
+                cw_confidence=flip_confidence,
                 floor_margin=args.floor_margin,
                 linf_topk=args.linf_topk,
                 w_flip=args.w_flip,
@@ -106,6 +117,7 @@ def train_one_epoch(
                 w_floor=args.w_floor,
                 w_ssim=args.w_ssim,
                 w_psnr=args.w_psnr,
+                flip_loss=flip_loss,
                 flip_loss_override=flip_override,
             )
             if args.loss == "feat":
@@ -116,14 +128,16 @@ def train_one_epoch(
                 target_indices=target_idx,
                 clean_bchw=clean,
                 adv_quant=adv_quant,
-                cw_confidence=args.cw_confidence,
+                cw_confidence=flip_confidence,
                 floor_margin=args.floor_margin,
                 w_flip=args.w_flip,
                 w_mae=args.w_mae,
                 w_floor=args.w_floor,
+                flip_loss=flip_loss,
             )
         else:
-            loss_cw = cw_loss(logits, target_idx)
+            flip_fn = dlr_loss if flip_loss == "dlr" else cw_loss
+            loss_cw = flip_fn(logits, target_idx)
             loss_ssim = ssim_loss_differentiable(clean, adv_quant)
             loss_psnr = psnr_loss_differentiable(clean, adv_quant)
             loss = loss_cw + args.ssim_weight * loss_ssim + args.psnr_weight * loss_psnr
@@ -135,12 +149,15 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         for k in totals:
             totals[k] += comps.get(k, 0.0)
         steps += 1
 
         if log_every > 0 and step % log_every == 0:
+            cur_lr = optimizer.param_groups[0]["lr"]
             if args.loss in ("reward", "feat"):
                 postfix = {
                     "loss": f"{comps['loss']:.3f}",
@@ -152,6 +169,7 @@ def train_one_epoch(
                     "fr": f"{comps['flip_rate']:.3f}",
                     "ps": f"{comps['pert_score']:.3f}",
                     "linf": f"{comps['linf_mean']:.5f}",
+                    "lr": f"{cur_lr:.2e}",
                 }
                 if args.loss == "feat":
                     postfix["fdist"] = f"{comps['feat_dist']:.3f}"
@@ -166,6 +184,7 @@ def train_one_epoch(
                         "fr": f"{comps['flip_rate']:.3f}",
                         "ps": f"{comps['pert_score']:.3f}",
                         "linf": f"{comps['linf_mean']:.5f}",
+                        "lr": f"{cur_lr:.2e}",
                     },
                     refresh=False,
                 )
@@ -176,6 +195,7 @@ def train_one_epoch(
                         "cw": f"{comps['cw']:.3f}",
                         "ssim": f"{comps['ssim']:.5f}",
                         "psnr": f"{comps['psnr']:.6f}",
+                        "lr": f"{cur_lr:.2e}",
                     },
                     refresh=False,
                 )

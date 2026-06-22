@@ -76,6 +76,7 @@ from paths import (
 from perturb_mirror.constants import MAX_LINF_DELTA, MIN_LINF_DELTA
 from train_loop import train_one_epoch, validate
 
+torch.set_float32_matmul_precision("high")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -361,7 +362,7 @@ def main() -> int:
 
     generator = build_generator(
         args.gen_arch,
-        max_linf=1.0/255.0,
+        max_linf=args.max_linf,
         base=args.gen_base,
         gen_dropout=args.gen_dropout,
     ).to(device)
@@ -465,7 +466,12 @@ def main() -> int:
                     },
                     args.save,
                 )
-                print(f"saved  -> {args.save}  (val score={best_score:.4f})")
+                print(
+                    f"saved  -> {args.save}  "
+                    f"[constraint max_linf={args.max_linf:.5f} (~{args.max_linf * 255:.2f}/255)]  "
+                    f"epoch={epoch}  val score={best_score:.4f}  "
+                    f"flip_rate={val_stats['flip_rate']:.3f}"
+                )
         else:
             # No validation: select the best epoch by the train-score proxy.
             train_score = compute_train_score(args, train_stats)
@@ -482,7 +488,13 @@ def main() -> int:
                     },
                     args.save,
                 )
-                print(f"saved  -> {args.save}  (train score={best_score:.4f})")
+                print(
+                    f"saved  -> {args.save}  "
+                    f"[constraint max_linf={args.max_linf:.5f} (~{args.max_linf * 255:.2f}/255)]  "
+                    f"epoch={epoch}  train score={best_score:.4f}  "
+                    f"flip_rate={train_stats.get('flip_rate', 0.0):.3f}  "
+                    f"linf_mean={train_stats.get('linf_mean', 0.0):.5f}"
+                )
 
     return 0
 

@@ -35,6 +35,7 @@ def train_one_epoch(
     log_every: int,
     desc: str = "train",
     scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
+    quantize: bool = True,
 ) -> dict[str, float]:
     generator.train()
     if args.loss in ("reward", "feat"):
@@ -68,6 +69,7 @@ def train_one_epoch(
         if flip_loss == "dlr"
         else float(getattr(args, "cw_confidence", 6.0))
     )
+    floor_ungated = bool(getattr(args, "floor_ungated", False))
 
     pbar = tqdm(loader, desc=desc, dynamic_ncols=True, leave=True)
     for step, (clean, labels) in enumerate(pbar, start=1):
@@ -85,6 +87,7 @@ def train_one_epoch(
                 classifier, generator, clean, feat_layers,
                 channels_last=channels_last,
                 grad_checkpoint=grad_checkpoint,
+                quantize=quantize,
             )
         else:
             logits, adv_quant = forward_adv(
@@ -92,6 +95,7 @@ def train_one_epoch(
                 channels_last=channels_last,
                 grad_checkpoint=grad_checkpoint,
                 checkpoint_segments=checkpoint_segments,
+                quantize=quantize,
             )
 
         if args.loss in ("reward", "feat"):
@@ -119,6 +123,7 @@ def train_one_epoch(
                 w_psnr=args.w_psnr,
                 flip_loss=flip_loss,
                 flip_loss_override=flip_override,
+                floor_ungated=floor_ungated,
             )
             if args.loss == "feat":
                 comps["feat_dist"] = feat_dist_val

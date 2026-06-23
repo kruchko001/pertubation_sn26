@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import torch
@@ -15,6 +16,33 @@ def _group_norm(channels: int) -> nn.GroupNorm:
         if channels % groups == 0:
             return nn.GroupNorm(groups, channels)
     return nn.GroupNorm(1, channels)
+
+
+def _init_head(head: nn.Conv2d, max_linf: float, head_init: float) -> None:
+    """Initialise a ``tanh(head) * max_linf`` perturbation head.
+
+    ``head_init <= 0`` keeps the original zero-init (perturbation ~0 at start —
+    stable but starts inside the uint8-quantization dead zone). ``head_init > 0``
+    seeds the bias so the initial L-inf perturbation is ~``head_init`` (with a
+    random per-channel sign), which lifts the generator above the quantization
+    floor from step 1 so the classifier sees a real change immediately. The
+    weights stay zero so the input-conditioned structure is learned from the
+    first gradient step.
+    """
+    nn.init.zeros_(head.weight)
+    if head.bias is None:
+        return
+    if head_init <= 0.0:
+        nn.init.zeros_(head.bias)
+        return
+    # tanh(b) * max_linf == head_init  ->  b == atanh(head_init / max_linf)
+    ratio = min(max(float(head_init) / max(float(max_linf), 1e-12), 0.0), 0.999)
+    bias_val = math.atanh(ratio)
+    with torch.no_grad():
+        signs = torch.where(
+            torch.rand_like(head.bias) < 0.5, -1.0, 1.0
+        )
+        head.bias.copy_(signs * bias_val)
 
 
 class ResBlock(nn.Module):
@@ -80,7 +108,7 @@ class Generator(nn.Module):
     which gives a stable optimisation start before the flip term takes over.
     """
 
-    def __init__(self, max_linf: float = 0.03, base: int = 48) -> None:
+    def __init__(self, max_linf: float = 0.03, base: int = 48, head_init: float = 0.0) -> None:
         super().__init__()
         self.max_linf = float(max_linf)
         b = int(base)
@@ -111,8 +139,7 @@ class Generator(nn.Module):
         self.up1 = Up(b * 2, b, b)          # -> H
 
         self.head = nn.Conv2d(b, 3, 3, padding=1)
-        nn.init.zeros_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
+        _init_head(self.head, self.max_linf, head_init)
 
         self.tanh = nn.Tanh()
 
@@ -185,6 +212,7 @@ class GeneratorResnet(nn.Module):
         *,
         gen_dropout: float = 0.0,
         data_dim: str = "high",
+        head_init: float = 0.0,
     ) -> None:
         super().__init__()
         self.max_linf = float(max_linf)
@@ -230,9 +258,7 @@ class GeneratorResnet(nn.Module):
             nn.Conv2d(ngf, 3, kernel_size=7, padding=0),
         )
 
-        nn.init.zeros_(self.blockf[1].weight)
-        if self.blockf[1].bias is not None:
-            nn.init.zeros_(self.blockf[1].bias)
+        _init_head(self.blockf[1], self.max_linf, head_init)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.block1(x)
@@ -255,17 +281,24 @@ def build_generator(
     max_linf: float = 0.03,
     base: int = 48,
     gen_dropout: float = 0.0,
+    head_init: float = 0.0,
 ) -> nn.Module:
     """Factory for the selectable generator architectures.
 
     ``unet``   -> :class:`Generator` (default; resolution-agnostic U-Net).
     ``resnet`` -> :class:`GeneratorResnet` (LTP port).
+
+    ``head_init`` seeds the perturbation head so the initial L-inf is ~that value
+    (default 0 = zero-init). A small positive value (e.g. 0.004) lifts the
+    generator above the uint8-quantization dead zone at the start of training.
     """
     arch = str(arch).lower()
     if arch == "unet":
-        return Generator(max_linf=max_linf, base=base)
+        return Generator(max_linf=max_linf, base=base, head_init=head_init)
     if arch == "resnet":
-        return GeneratorResnet(max_linf=max_linf, base=base, gen_dropout=gen_dropout)
+        return GeneratorResnet(
+            max_linf=max_linf, base=base, gen_dropout=gen_dropout, head_init=head_init
+        )
     raise ValueError(f"unknown gen-arch: {arch!r} (expected 'unet' or 'resnet')")
 
 

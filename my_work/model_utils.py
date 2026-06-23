@@ -347,6 +347,7 @@ def reward_aligned_loss(
     min_psnr_db: float = MIN_PSNR_DB,
     flip_loss: str = "cw",
     flip_loss_override: torch.Tensor | None = None,
+    floor_ungated: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Loss that directly maximises the validator's perturbation_score.
@@ -413,7 +414,13 @@ def reward_aligned_loss(
         return (term * mask).sum() / mask_denom
 
     score_loss = masked_mean(1.0 - pert_score)
-    floor_loss = masked_mean(floor_hinge)
+    # The floor hinge can optionally be applied to ALL images (not just the ones
+    # that currently flip). This breaks the cold-start deadlock: with flip-gating
+    # only, nothing flips -> the floor term never fires -> L-inf never grows into
+    # the valid [min_delta, max_delta] band -> still nothing flips. An ungated
+    # floor pushes every image's L-inf above the quantization/validator floor so
+    # perturbations actually reach the classifier and flips can begin.
+    floor_loss = floor_hinge.mean() if floor_ungated else masked_mean(floor_hinge)
     ssim_loss = masked_mean(ssim_hinge)
     psnr_loss = masked_mean(psnr_hinge)
 
@@ -658,15 +665,21 @@ def forward_adv(
     channels_last: bool = False,
     grad_checkpoint: bool = False,
     checkpoint_segments: int = 4,
+    quantize: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generator → STE quantize → PREPROCESS → logits.
     Pipeline:  clean [0,1] → δ → adv → uint8 STE → PREPROCESS → EfficientNet
     Returns (logits, adv_quant). adv_quant stays in NCHW [0,1] for the loss.
+
+    ``quantize=False`` skips the uint8 rounding so sub-quantization (<~1/255)
+    perturbations still change the classifier input — used for an early warmup
+    so the generator can climb out of the quantization dead zone before the
+    validator-exact rounding is re-enabled.
     """
     perturbation = generator(clean_bchw)
     adv = torch.clamp(clean_bchw + perturbation, 0.0, 1.0)
-    adv_quant = quantize_ste(adv)
+    adv_quant = quantize_ste(adv) if quantize else adv
     model_in = apply_validator_preprocess(adv_quant)
     if channels_last:
         model_in = model_in.contiguous(memory_format=torch.channels_last)
@@ -684,16 +697,18 @@ def forward_adv_with_feats(
     feat_layers: tuple[int, ...],
     channels_last: bool = False,
     grad_checkpoint: bool = False,
+    quantize: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[int, torch.Tensor]]:
     """Like :func:`forward_adv` but also returns adversarial mid-level features.
 
     Used by the LTP feature-separation flip driver. Logits and features come
     from a single classifier pass over the (STE-quantised, preprocessed) adv
-    image, so the extra signal costs no additional forward.
+    image, so the extra signal costs no additional forward. ``quantize=False``
+    skips uint8 rounding for the warmup (see :func:`forward_adv`).
     """
     perturbation = generator(clean_bchw)
     adv = torch.clamp(clean_bchw + perturbation, 0.0, 1.0)
-    adv_quant = quantize_ste(adv)
+    adv_quant = quantize_ste(adv) if quantize else adv
     model_in = apply_validator_preprocess(adv_quant)
     if channels_last:
         model_in = model_in.contiguous(memory_format=torch.channels_last)

@@ -114,6 +114,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--psnr-weight", type=float, default=5.0)
     parser.add_argument("--cw-confidence", type=float, default=6.0)
     parser.add_argument("--floor-margin", type=float, default=0.0005)
+    parser.add_argument("--floor-ungated", action=argparse.BooleanOptionalAction, default=False,
+                        help="Apply the L-inf floor hinge to ALL images, not just the ones that "
+                             "currently flip. Breaks the cold-start deadlock by pushing every "
+                             "perturbation above the quantization/validator floor (~0.003) so "
+                             "flips can begin. Recommended with reward/feat loss.")
+    parser.add_argument("--warmup-no-quant", type=int, default=0,
+                        help="Train the first N epochs WITHOUT uint8 quantization in the forward "
+                             "pass, so sub-1/255 perturbations still reach the classifier and the "
+                             "generator can climb out of the quantization dead zone. Validator-exact "
+                             "rounding resumes from epoch N+1.")
     parser.add_argument("--linf-topk", type=int, default=32)
     parser.add_argument("--w-flip", type=float, default=1.0)
     parser.add_argument("--w-score", type=float, default=4.0)
@@ -133,6 +143,10 @@ def parse_args() -> argparse.Namespace:
                              "LTP uses 64 for the resnet arch.")
     parser.add_argument("--gen-dropout", type=float, default=0.0,
                         help="Dropout in resnet generator residual blocks (LTP used 0.5)")
+    parser.add_argument("--head-init", type=float, default=0.0,
+                        help="Seed the generator head so the INITIAL L-inf perturbation is ~this "
+                             "value (default 0=zero-init). A small value (e.g. 0.004) lifts the "
+                             "generator above the uint8-quantization dead zone from step 1.")
     parser.add_argument("--feat-layers", type=str, default="4",
                         help="With --loss feat: comma-separated EfficientNetV2-L feature "
                              "block indices to separate (0..8; mid-level ~3-5)")
@@ -304,7 +318,7 @@ def main() -> int:
     train_sampler = BucketBatchSampler(
         train_shapes,
         batch_size=args.batch_size,
-        max_pixels=None,
+        max_pixels=max_pixels,
         shuffle=True,
         drop_last=args.drop_last,
         seed=args.seed,
@@ -335,7 +349,7 @@ def main() -> int:
         val_sampler = BucketBatchSampler(
             val_shapes,
             batch_size=args.batch_size,
-            max_pixels=None,
+            max_pixels=max_pixels,
             shuffle=False,
             drop_last=False,
             seed=args.seed,
@@ -365,10 +379,15 @@ def main() -> int:
         max_linf=args.max_linf,
         base=args.gen_base,
         gen_dropout=args.gen_dropout,
+        head_init=args.head_init,
     ).to(device)
     n_params = sum(p.numel() for p in generator.parameters())
     print(f"generator           : arch={args.gen_arch}  base={args.gen_base}  "
           f"params={n_params/1e6:.2f}M")
+    print(f"head_init           : {args.head_init:g} "
+          f"({'zero-init' if args.head_init <= 0 else f'~{args.head_init * 255:.2f}/255 initial L-inf'})")
+    print(f"floor_ungated       : {args.floor_ungated}")
+    print(f"warmup_no_quant     : {args.warmup_no_quant} epoch(s)")
     if args.loss == "feat":
         print(f"feat flip driver    : layers={args.feat_layers}  w_feat={args.w_feat}  "
               f"normalize={args.feat_normalize}")
@@ -429,6 +448,12 @@ def main() -> int:
 
     for epoch in range(1, args.epochs + 1):
         train_sampler.set_epoch(epoch)
+        quantize = epoch > args.warmup_no_quant
+        if args.warmup_no_quant > 0 and epoch == 1:
+            print(f"warmup (no quant)   : epochs 1..{args.warmup_no_quant} "
+                  f"(uint8 rounding disabled)")
+        if args.warmup_no_quant > 0 and epoch == args.warmup_no_quant + 1:
+            print("quantization        : re-enabled (validator-exact uint8 rounding)")
         train_stats = train_one_epoch(
             generator=generator,
             classifier=classifier,
@@ -439,6 +464,7 @@ def main() -> int:
             log_every=args.log_every,
             desc=f"epoch {epoch}/{args.epochs}",
             scheduler=scheduler,
+            quantize=quantize,
         )
         print_train_summary(args, train_stats)
 

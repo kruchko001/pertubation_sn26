@@ -34,6 +34,12 @@ Usage (from my_work/):
   # LTP ResNet generator instead of the U-Net (LTP uses base=64):
   python train_generator_local.py --gen-arch resnet --gen-base 64 --loss feat --feat-layers 4
 
+  # flip-first: keep pushing fragile flips until ROBUST before squeezing norm
+  # (recommended when flip_rate stalls near 0); --dlr-confidence sets the
+  # robustness buffer, --robust-margin can decouple it from the flip push:
+  python train_generator_local.py --loss flipfirst --floor-ungated --head-init 0.004 \
+      --warmup-no-quant 3 --dlr-confidence 0.3 --epochs 30 --batch-size 4
+
   # margin-CW flip + MAE perturbation restriction (L-inf<=1/255 from generator,
   # min-L-inf floor protects the 0.003 gate); tune --w-mae to trade flip vs size:
   python train_generator_local.py --loss mae --w-mae 100 --epochs 30 --batch-size 4
@@ -93,12 +99,24 @@ def parse_args() -> argparse.Namespace:
                              "isn't kicked around before it stabilises.")
     parser.add_argument("--min-lr", type=float, default=1e-6,
                         help="Cosine decay floor (final lr at the end of training).")
-    parser.add_argument("--loss", choices=["reward", "legacy", "feat", "mae"], default="reward",
-                        help="reward=margin-CW flip driver; feat=LTP mid-level "
+    parser.add_argument("--loss", choices=["reward", "legacy", "feat", "mae", "flipfirst"],
+                        default="reward",
+                        help="reward=margin-CW flip driver; flipfirst=flip-first reward "
+                             "loss that keeps pushing fragile flips until they are ROBUST "
+                             "(flipped past the full confidence margin) before squeezing "
+                             "norm, with the flip term dominant during cold-start "
+                             "(recommended when flip_rate stays low); feat=LTP mid-level "
                              "feature-separation flip driver (keeps reward L-inf/SSIM/PSNR "
                              "terms); mae=margin-CW flip driver + MAE perturbation restriction "
                              "+ min-L-inf floor (L-inf<=1/255 enforced by the generator); "
                              "legacy=plain CW+SSIM+PSNR")
+    parser.add_argument("--robust-margin", type=float, default=None,
+                        help="With --loss flipfirst: flip margin (in the active flip-loss "
+                             "scale; normalised DLR units for --flip-loss dlr, raw logits for "
+                             "cw) an image must clear before the size/quality terms start "
+                             "shrinking it. None (default) couples it to the flip "
+                             "confidence (--dlr-confidence/--cw-confidence). Larger => more "
+                             "robust flips that survive the validator's independent pass.")
     parser.add_argument("--flip-loss", choices=["cw", "dlr"], default="dlr",
                         help="Flip driver for reward/feat/mae/legacy losses. "
                              "dlr (default)=Difference-of-Logits-Ratio: normalises the "
@@ -200,14 +218,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_train_summary(args: argparse.Namespace, train_stats: dict[str, float]) -> None:
-    if args.loss in ("reward", "feat"):
+    if args.loss in ("reward", "feat", "flipfirst"):
         fdist = f" fdist={train_stats['feat_dist']:.4f}" if "feat_dist" in train_stats else ""
+        rrate = f" robust_rate={train_stats['robust_rate']:.3f}" if "robust_rate" in train_stats else ""
         print(
             f"train  loss={train_stats['loss']:.4f} | "
             f"flip={train_stats['flip']:.4f} score={train_stats['score']:.4f} "
             f"floor={train_stats['floor']:.4f} ssim_h={train_stats['ssim_h']:.4f} "
             f"psnr_h={train_stats['psnr_h']:.4f}{fdist} | "
-            f"flip_rate={train_stats['flip_rate']:.3f} "
+            f"flip_rate={train_stats['flip_rate']:.3f}{rrate} "
             f"pert_score={train_stats['pert_score']:.4f} "
             f"linf_mean={train_stats['linf_mean']:.5f}"
         )
@@ -238,7 +257,7 @@ def compute_train_score(args: argparse.Namespace, train_stats: dict[str, float])
     without a held-out split. For the legacy loss (no score notion) we fall back
     to negative loss.
     """
-    if args.loss in ("reward", "feat", "mae"):
+    if args.loss in ("reward", "feat", "mae", "flipfirst"):
         return float(train_stats.get("flip_rate", 0.0) * train_stats.get("pert_score", 0.0))
     return -float(train_stats.get("loss", float("inf")))
 

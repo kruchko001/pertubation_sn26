@@ -15,6 +15,7 @@ from model_utils import (
     dlr_loss,
     eval_batch,
     feat_separation_loss,
+    flip_first_loss,
     forward_adv,
     forward_adv_with_feats,
     mae_aligned_loss,
@@ -38,7 +39,7 @@ def train_one_epoch(
     quantize: bool = True,
 ) -> dict[str, float]:
     generator.train()
-    if args.loss in ("reward", "feat"):
+    if args.loss in ("reward", "feat", "flipfirst"):
         totals: dict[str, float] = {
             "loss": 0.0, "flip": 0.0, "score": 0.0, "floor": 0.0,
             "ssim_h": 0.0, "psnr_h": 0.0, "flip_rate": 0.0,
@@ -46,6 +47,8 @@ def train_one_epoch(
         }
         if args.loss == "feat":
             totals["feat_dist"] = 0.0
+        if args.loss == "flipfirst":
+            totals["robust_rate"] = 0.0
     elif args.loss == "mae":
         totals = {
             "loss": 0.0, "flip": 0.0, "mae": 0.0, "floor": 0.0,
@@ -127,6 +130,24 @@ def train_one_epoch(
             )
             if args.loss == "feat":
                 comps["feat_dist"] = feat_dist_val
+        elif args.loss == "flipfirst":
+            loss, comps = flip_first_loss(
+                logits=logits,
+                target_indices=target_idx,
+                clean_bchw=clean,
+                adv_quant=adv_quant,
+                cw_confidence=flip_confidence,
+                robust_margin=getattr(args, "robust_margin", None),
+                floor_margin=args.floor_margin,
+                linf_topk=args.linf_topk,
+                w_flip=args.w_flip,
+                w_score=args.w_score,
+                w_floor=args.w_floor,
+                w_ssim=args.w_ssim,
+                w_psnr=args.w_psnr,
+                flip_loss=flip_loss,
+                floor_ungated=floor_ungated,
+            )
         elif args.loss == "mae":
             loss, comps = mae_aligned_loss(
                 logits=logits,
@@ -163,7 +184,7 @@ def train_one_epoch(
 
         if log_every > 0 and step % log_every == 0:
             cur_lr = optimizer.param_groups[0]["lr"]
-            if args.loss in ("reward", "feat"):
+            if args.loss in ("reward", "feat", "flipfirst"):
                 postfix = {
                     "loss": f"{comps['loss']:.3f}",
                     "flip": f"{comps['flip']:.3f}",
@@ -178,6 +199,8 @@ def train_one_epoch(
                 }
                 if args.loss == "feat":
                     postfix["fdist"] = f"{comps['feat_dist']:.3f}"
+                if args.loss == "flipfirst":
+                    postfix["rr"] = f"{comps['robust_rate']:.3f}"
                 pbar.set_postfix(postfix, refresh=False)
             elif args.loss == "mae":
                 pbar.set_postfix(

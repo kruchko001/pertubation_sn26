@@ -278,6 +278,38 @@ def _flip_per_sample(
     return _cw_per_sample(logits, target_indices, confidence)
 
 
+def _signed_margin_per_sample(
+    logits: torch.Tensor,
+    target_indices: torch.Tensor,
+    flip_loss: str = "dlr",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(signed_margin, flipped)``.
+
+    ``signed_margin = z_true - max_{i != true} z_i`` is > 0 while the true class
+    still wins and < 0 once the image is flipped — the SIGNED counterpart of the
+    one-sided hinges in ``_cw_per_sample`` / ``_dlr_per_sample``. For ``"dlr"``
+    the margin is divided by the logit spread (``z_pi1 - z_pi3``) so it is
+    invariant to per-image logit scale, matching the DLR flip driver.
+
+    The signed margin lets a caller distinguish a *fragile* flip (small negative
+    margin, easily reverted by the validator's independent forward pass) from a
+    *robust* one, which the flip-first loss needs to decide when to start
+    squeezing the perturbation size.
+    """
+    idx = target_indices.view(-1, 1)
+    target_logits = logits.gather(1, idx).squeeze(1)
+    mask = torch.ones_like(logits, dtype=torch.bool)
+    mask.scatter_(1, idx, False)
+    other_logits = logits.masked_fill(~mask, float("-inf")).max(dim=1).values
+    raw = target_logits - other_logits
+    flipped = (raw < 0).float()
+    if flip_loss == "dlr":
+        sorted_logits, _ = logits.sort(dim=1, descending=True)
+        spread = (sorted_logits[:, 0] - sorted_logits[:, 2]).clamp_min(1e-12)
+        return raw / spread, flipped
+    return raw, flipped
+
+
 def ssim_clean_stats(x_clean: torch.Tensor, kernel_size: int = 11) -> dict:
     """Precompute the clean-image SSIM terms that don't depend on the adv image.
 
@@ -442,6 +474,139 @@ def reward_aligned_loss(
         "psnr_h": float(psnr_loss.item()),
         "flip_rate": float(mask.mean().item()),
         "pert_score": float(masked_mean(pert_score).item()),
+        "linf_mean": float(linf_hard.mean().item()),
+    }
+    return loss, components
+
+
+def flip_first_loss(
+    logits: torch.Tensor,
+    target_indices: torch.Tensor,
+    clean_bchw: torch.Tensor,
+    adv_quant: torch.Tensor,
+    *,
+    min_delta: float = MIN_LINF_DELTA,
+    max_delta: float = MAX_LINF_DELTA,
+    linf_component_weight: float = LINF_COMPONENT_WEIGHT,
+    rmse_component_weight: float = RMSE_COMPONENT_WEIGHT,
+    cw_confidence: float = 0.5,
+    robust_margin: float | None = None,
+    floor_margin: float = 0.0005,
+    linf_topk: int = 32,
+    w_flip: float = 8.0,
+    w_score: float = 4.0,
+    w_floor: float = 80.0,
+    w_ssim: float = 60.0,
+    w_psnr: float = 0.05,
+    min_ssim: float = MIN_SSIM,
+    min_psnr_db: float = MIN_PSNR_DB,
+    flip_loss: str = "dlr",
+    floor_ungated: bool = False,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Flip-first reward loss — learn a *robust* flip before squeezing norm.
+
+    This is a drop-in alternative to :func:`reward_aligned_loss` aimed squarely
+    at the failure mode where the generator never reliably flips at the 1/255
+    budget. Two changes:
+
+      1. **Robust gate.** ``reward_aligned_loss`` shrinks the perturbation of any
+         image whose argmax has flipped — including *fragile* flips sitting a
+         hair past the decision boundary. The size terms then pull such an image
+         back across the boundary, the flip term reactivates, and the optimiser
+         settles into an equilibrium *on* the boundary that the validator's
+         independent (slightly non-deterministic) forward pass routinely
+         reverts. Here the size/quality terms (``score``, ``ssim``, ``psnr``, and
+         the gated ``floor``) fire only once an image is flipped by the full
+         ``robust_margin`` (default = ``cw_confidence``). Until then the image
+         keeps receiving the undiluted flip gradient, so it converges to a flip
+         with a safety buffer instead of a knife-edge one.
+
+      2. **Flip dominates cold-start.** ``w_flip`` defaults high (8) so the flip
+         driver is the dominant term while few images flip; the norm/quality
+         pressure only ramps in (per image) as robust flips accumulate. This is
+         the "flip first, minimise norm second" curriculum — and it matches the
+         validator, which scores *only* images that actually flip.
+
+    The L-inf gradient uses the same top-k straight-through estimator as
+    :func:`reward_aligned_loss`. ``robust_margin`` is expressed in the active
+    flip-loss scale (normalised DLR units for ``"dlr"``, raw logits for
+    ``"cw"``); ``None`` couples it to ``cw_confidence`` so a single knob controls
+    both how hard the flip term pushes and when norm-squeezing begins.
+    """
+    margin, flipped = _signed_margin_per_sample(logits, target_indices, flip_loss)
+    # Always-on flip driver: drive the (true - best-other) margin below
+    # -cw_confidence. Hinge => the term switches off only once robustly flipped.
+    flip_hinge = torch.clamp(margin + float(cw_confidence), min=0.0)
+    flip_term = flip_hinge.mean()
+
+    delta = adv_quant - clean_bchw
+    abs_delta = delta.abs()
+    flat = abs_delta.flatten(1)
+
+    linf_hard = flat.amax(dim=1)
+    k = min(int(linf_topk), int(flat.shape[1]))
+    linf_soft = flat.topk(k, dim=1).values.mean(dim=1)
+    # straight-through: value == hard max, gradient == d(top-k mean)
+    linf_ste = linf_hard.detach() + (linf_soft - linf_soft.detach())
+
+    rmse = torch.sqrt(delta.pow(2).flatten(1).mean(dim=1) + 1e-12)
+
+    denom = max(1e-12, float(max_delta) - float(min_delta))
+    linf_ratio = ((linf_ste - float(min_delta)) / denom).clamp(0.0, 1.0)
+    rmse_ratio = (rmse / float(max_delta)).clamp(0.0, 1.0)
+    linf_score = (1.0 - linf_ratio) ** 2
+    rmse_score = (1.0 - rmse_ratio) ** 2
+    total_w = max(1e-12, float(linf_component_weight) + float(rmse_component_weight))
+    pert_score = (
+        float(linf_component_weight) * linf_score + float(rmse_component_weight) * rmse_score
+    ) / total_w
+
+    floor_hinge = torch.clamp(float(min_delta) + float(floor_margin) - linf_hard, min=0.0)
+
+    ssim = _ssim_per_image(clean_bchw, adv_quant)
+    ssim_hinge = torch.clamp(float(min_ssim) - ssim, min=0.0)
+
+    mse = delta.pow(2).flatten(1).mean(dim=1)
+    psnr_db = -10.0 * torch.log10(mse + 1e-12)
+    psnr_hinge = torch.clamp(float(min_psnr_db) - psnr_db, min=0.0)
+
+    # Robust gate: only squeeze images flipped past the full robust margin so
+    # fragile, on-the-boundary flips keep being pushed instead of shrunk back.
+    rmargin = float(cw_confidence) if robust_margin is None else float(robust_margin)
+    robust = (margin < -rmargin).float().detach()
+    flipped_mask = flipped.detach()
+    robust_denom = robust.sum().clamp(min=1.0)
+    flipped_denom = flipped_mask.sum().clamp(min=1.0)
+
+    def robust_mean(term: torch.Tensor) -> torch.Tensor:
+        return (term * robust).sum() / robust_denom
+
+    score_loss = robust_mean(1.0 - pert_score)
+    # Floor optionally ungated (all images) to break the quantization dead zone;
+    # otherwise it too waits for a robust flip.
+    floor_loss = floor_hinge.mean() if floor_ungated else robust_mean(floor_hinge)
+    ssim_loss = robust_mean(ssim_hinge)
+    psnr_loss = robust_mean(psnr_hinge)
+
+    loss = (
+        w_flip * flip_term
+        + w_score * score_loss
+        + w_floor * floor_loss
+        + w_ssim * ssim_loss
+        + w_psnr * psnr_loss
+    )
+
+    pert_score_flipped = (pert_score * flipped_mask).sum() / flipped_denom
+    components = {
+        "loss": float(loss.item()),
+        "flip": float(flip_term.item()),
+        "score": float(score_loss.item()),
+        "floor": float(floor_loss.item()),
+        "ssim_h": float(ssim_loss.item()),
+        "psnr_h": float(psnr_loss.item()),
+        "flip_rate": float(flipped_mask.mean().item()),
+        "robust_rate": float(robust.mean().item()),
+        "pert_score": float(pert_score_flipped.item()),
         "linf_mean": float(linf_hard.mean().item()),
     }
     return loss, components
